@@ -1,0 +1,14 @@
+# зависимости и сборка
+.venv/
+node_modules/
+frontend/dist/
+__pycache__/
+.pytest_cache/
+
+# рабочие данные платформы: проекты пользователя, базы превью, окружения, сокеты
+backend/data/projects/*
+!backend/data/projects/example-shop.json
+backend/data/db/
+backend/data/envs/
+backend/data/fw/
+backend/data/secret.key

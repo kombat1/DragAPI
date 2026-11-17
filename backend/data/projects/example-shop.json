@@ -1,0 +1,976 @@
+{
+  "name": "Пример: магазин",
+  "nodes": [
+    {
+      "id": "hello",
+      "type": "endpoint",
+      "position": {
+        "x": 40,
+        "y": 40
+      },
+      "data": {
+        "method": "GET",
+        "path": "/hello",
+        "summary": "Приветствие"
+      },
+      "measured": {
+        "width": 230,
+        "height": 57
+      }
+    },
+    {
+      "id": "hello-in",
+      "type": "input",
+      "position": {
+        "x": 330,
+        "y": 40
+      },
+      "data": {
+        "source": "query",
+        "fields": [
+          {
+            "name": "name",
+            "type": "str",
+            "required": false,
+            "default": "world"
+          }
+        ]
+      },
+      "measured": {
+        "width": 230,
+        "height": 74
+      }
+    },
+    {
+      "id": "hello-logic",
+      "type": "logic",
+      "position": {
+        "x": 620,
+        "y": 40
+      },
+      "data": {
+        "assignments": [
+          {
+            "target": "greeting",
+            "expr": "f'Hello, {name}! Это {env[\"SHOP_NAME\"]}'"
+          }
+        ]
+      },
+      "measured": {
+        "width": 230,
+        "height": 57
+      }
+    },
+    {
+      "id": "hello-out",
+      "type": "response",
+      "position": {
+        "x": 910,
+        "y": 40
+      },
+      "data": {
+        "status": 200,
+        "body": [
+          {
+            "key": "message",
+            "expr": "greeting"
+          }
+        ]
+      },
+      "measured": {
+        "width": 230,
+        "height": 74
+      }
+    },
+    {
+      "id": "create",
+      "type": "endpoint",
+      "position": {
+        "x": 40,
+        "y": 290
+      },
+      "data": {
+        "method": "POST",
+        "path": "/orders",
+        "summary": "Создать заказ"
+      },
+      "measured": {
+        "width": 230,
+        "height": 57
+      }
+    },
+    {
+      "id": "create-in",
+      "type": "input",
+      "position": {
+        "x": 330,
+        "y": 290
+      },
+      "data": {
+        "source": "json",
+        "fields": [
+          {
+            "name": "item",
+            "type": "str",
+            "required": true
+          },
+          {
+            "name": "price",
+            "type": "float",
+            "required": true
+          },
+          {
+            "name": "qty",
+            "type": "int",
+            "required": false,
+            "default": 1
+          }
+        ]
+      },
+      "measured": {
+        "width": 230,
+        "height": 110
+      }
+    },
+    {
+      "id": "create-check",
+      "type": "validate",
+      "position": {
+        "x": 620,
+        "y": 290
+      },
+      "data": {
+        "rules": [
+          {
+            "field": "qty",
+            "op": "min",
+            "value": "1",
+            "message": "Количество должно быть не меньше 1"
+          },
+          {
+            "field": "price",
+            "op": "min",
+            "value": "0"
+          },
+          {
+            "field": "item",
+            "op": "min_len",
+            "value": "2"
+          }
+        ]
+      },
+      "measured": {
+        "width": 230,
+        "height": 93
+      }
+    },
+    {
+      "id": "create-logic",
+      "type": "logic",
+      "position": {
+        "x": 910,
+        "y": 290
+      },
+      "data": {
+        "assignments": [
+          {
+            "target": "total",
+            "expr": "round(price * qty, 2)"
+          }
+        ]
+      },
+      "measured": {
+        "width": 230,
+        "height": 57
+      }
+    },
+    {
+      "id": "create-db",
+      "type": "db",
+      "position": {
+        "x": 1200,
+        "y": 290
+      },
+      "data": {
+        "model": "orders",
+        "op": "insert",
+        "target": "order",
+        "values": [
+          {
+            "field": "item",
+            "expr": "item"
+          },
+          {
+            "field": "price",
+            "expr": "price"
+          },
+          {
+            "field": "qty",
+            "expr": "qty"
+          },
+          {
+            "field": "total",
+            "expr": "total"
+          },
+          {
+            "field": "status",
+            "expr": "'new'"
+          }
+        ]
+      },
+      "measured": {
+        "width": 230,
+        "height": 164
+      }
+    },
+    {
+      "id": "create-out",
+      "type": "response",
+      "position": {
+        "x": 1490,
+        "y": 290
+      },
+      "data": {
+        "status": 201,
+        "body": [
+          {
+            "key": "order",
+            "expr": "order"
+          }
+        ]
+      },
+      "measured": {
+        "width": 230,
+        "height": 74
+      }
+    },
+    {
+      "id": "list",
+      "type": "endpoint",
+      "position": {
+        "x": 40,
+        "y": 540
+      },
+      "data": {
+        "method": "GET",
+        "path": "/orders",
+        "summary": "Список заказов"
+      },
+      "measured": {
+        "width": 230,
+        "height": 57
+      }
+    },
+    {
+      "id": "list-in",
+      "type": "input",
+      "position": {
+        "x": 330,
+        "y": 540
+      },
+      "data": {
+        "source": "query",
+        "fields": [
+          {
+            "name": "limit",
+            "type": "int",
+            "required": false,
+            "default": 50
+          }
+        ]
+      },
+      "measured": {
+        "width": 230,
+        "height": 74
+      }
+    },
+    {
+      "id": "list-db",
+      "type": "db",
+      "position": {
+        "x": 620,
+        "y": 540
+      },
+      "data": {
+        "model": "orders",
+        "op": "list",
+        "target": "orders",
+        "filters": [],
+        "limit": "100",
+        "order_by": "id",
+        "descending": true
+      },
+      "measured": {
+        "width": 230,
+        "height": 75
+      }
+    },
+    {
+      "id": "list-out",
+      "type": "response",
+      "position": {
+        "x": 910,
+        "y": 540
+      },
+      "data": {
+        "status": 200,
+        "body": [
+          {
+            "key": "count",
+            "expr": "len(orders)"
+          },
+          {
+            "key": "items",
+            "expr": "orders[:limit]"
+          }
+        ]
+      },
+      "measured": {
+        "width": 230,
+        "height": 92
+      }
+    },
+    {
+      "id": "get",
+      "type": "endpoint",
+      "position": {
+        "x": 40,
+        "y": 790
+      },
+      "data": {
+        "method": "GET",
+        "path": "/orders/{order_id}",
+        "summary": "Заказ по id"
+      },
+      "measured": {
+        "width": 230,
+        "height": 57
+      }
+    },
+    {
+      "id": "get-in",
+      "type": "input",
+      "position": {
+        "x": 330,
+        "y": 790
+      },
+      "data": {
+        "source": "path",
+        "fields": [
+          {
+            "name": "order_id",
+            "type": "int",
+            "required": true
+          }
+        ]
+      },
+      "measured": {
+        "width": 230,
+        "height": 74
+      }
+    },
+    {
+      "id": "get-db",
+      "type": "db",
+      "position": {
+        "x": 620,
+        "y": 790
+      },
+      "data": {
+        "model": "orders",
+        "op": "get",
+        "target": "order",
+        "id_expr": "order_id"
+      },
+      "measured": {
+        "width": 230,
+        "height": 75
+      }
+    },
+    {
+      "id": "get-if",
+      "type": "condition",
+      "position": {
+        "x": 910,
+        "y": 790
+      },
+      "data": {
+        "expr": "order is None"
+      },
+      "measured": {
+        "width": 230,
+        "height": 84
+      }
+    },
+    {
+      "id": "get-404",
+      "type": "response",
+      "position": {
+        "x": 1200,
+        "y": 720
+      },
+      "data": {
+        "status": 404,
+        "body": [
+          {
+            "key": "error",
+            "expr": "f'Заказ {order_id} не найден'"
+          }
+        ]
+      },
+      "measured": {
+        "width": 230,
+        "height": 74
+      }
+    },
+    {
+      "id": "get-200",
+      "type": "response",
+      "position": {
+        "x": 1200,
+        "y": 880
+      },
+      "data": {
+        "status": 200,
+        "body": [
+          {
+            "key": "order",
+            "expr": "order"
+          }
+        ]
+      },
+      "measured": {
+        "width": 230,
+        "height": 74
+      }
+    },
+    {
+      "id": "delete",
+      "type": "endpoint",
+      "position": {
+        "x": 40,
+        "y": 1040
+      },
+      "data": {
+        "method": "DELETE",
+        "path": "/orders/{order_id}",
+        "summary": "Удалить заказ (нужен X-API-Key)"
+      },
+      "measured": {
+        "width": 230,
+        "height": 57
+      }
+    },
+    {
+      "id": "delete-auth",
+      "type": "auth",
+      "position": {
+        "x": 330,
+        "y": 1040
+      },
+      "data": {
+        "scheme": "api_key_header",
+        "name": "X-API-Key",
+        "secret_env": "API_KEY"
+      },
+      "measured": {
+        "width": 230,
+        "height": 75
+      },
+      "selected": false
+    },
+    {
+      "id": "delete-in",
+      "type": "input",
+      "position": {
+        "x": 620,
+        "y": 1040
+      },
+      "data": {
+        "source": "path",
+        "fields": [
+          {
+            "name": "order_id",
+            "type": "int",
+            "required": true
+          }
+        ]
+      },
+      "measured": {
+        "width": 230,
+        "height": 74
+      }
+    },
+    {
+      "id": "delete-db",
+      "type": "db",
+      "position": {
+        "x": 910,
+        "y": 1040
+      },
+      "data": {
+        "model": "orders",
+        "op": "delete",
+        "target": "deleted",
+        "id_expr": "order_id"
+      },
+      "measured": {
+        "width": 230,
+        "height": 75
+      }
+    },
+    {
+      "id": "delete-if",
+      "type": "condition",
+      "position": {
+        "x": 1200,
+        "y": 1040
+      },
+      "data": {
+        "expr": "deleted"
+      },
+      "measured": {
+        "width": 230,
+        "height": 84
+      }
+    },
+    {
+      "id": "delete-200",
+      "type": "response",
+      "position": {
+        "x": 1490,
+        "y": 970
+      },
+      "data": {
+        "status": 200,
+        "body": [
+          {
+            "key": "deleted",
+            "expr": "order_id"
+          }
+        ]
+      },
+      "measured": {
+        "width": 230,
+        "height": 74
+      }
+    },
+    {
+      "id": "delete-404",
+      "type": "response",
+      "position": {
+        "x": 1490,
+        "y": 1130
+      },
+      "data": {
+        "status": 404,
+        "body": [
+          {
+            "key": "error",
+            "expr": "f'Заказ {order_id} не найден'"
+          }
+        ]
+      },
+      "measured": {
+        "width": 230,
+        "height": 74
+      }
+    },
+    {
+      "id": "stats",
+      "type": "endpoint",
+      "position": {
+        "x": 40,
+        "y": 1290
+      },
+      "data": {
+        "method": "POST",
+        "path": "/text/stats",
+        "summary": "Статистика текста (Python-код)"
+      },
+      "measured": {
+        "width": 230,
+        "height": 57
+      }
+    },
+    {
+      "id": "stats-in",
+      "type": "input",
+      "position": {
+        "x": 330,
+        "y": 1290
+      },
+      "data": {
+        "source": "json",
+        "fields": [
+          {
+            "name": "text",
+            "type": "str",
+            "required": true
+          },
+          {
+            "name": "top",
+            "type": "int",
+            "required": false,
+            "default": 3
+          },
+          {
+            "name": "min_len",
+            "type": "int",
+            "required": false,
+            "default": 3
+          }
+        ]
+      },
+      "measured": {
+        "width": 230,
+        "height": 110
+      }
+    },
+    {
+      "id": "stats-check",
+      "type": "validate",
+      "position": {
+        "x": 620,
+        "y": 1290
+      },
+      "data": {
+        "rules": [
+          {
+            "field": "text",
+            "op": "max_len",
+            "value": "10000"
+          },
+          {
+            "field": "top",
+            "op": "min",
+            "value": "1"
+          },
+          {
+            "field": "top",
+            "op": "max",
+            "value": "20"
+          }
+        ]
+      },
+      "measured": {
+        "width": 230,
+        "height": 93
+      }
+    },
+    {
+      "id": "stats-code",
+      "type": "code",
+      "position": {
+        "x": 910,
+        "y": 1290
+      },
+      "data": {
+        "code": "from collections import Counter\n\n\ndef run(data, env):\n    words = [w.strip(\".,!?:;()\\\"'«»\").lower() for w in data[\"text\"].split()]\n    words = [w for w in words if len(w) >= data[\"min_len\"]]\n    print(f\"слов после фильтра: {len(words)}\")\n    top = Counter(words).most_common(data[\"top\"])\n    return {\n        \"word_count\": len(words),\n        \"top_words\": [{\"word\": w, \"count\": c} for w, c in top],\n    }\n",
+        "outputs": [
+          "word_count",
+          "top_words"
+        ],
+        "timeout": 2,
+        "memory_mb": 128
+      },
+      "measured": {
+        "width": 230,
+        "height": 128
+      }
+    },
+    {
+      "id": "stats-out",
+      "type": "response",
+      "position": {
+        "x": 1200,
+        "y": 1290
+      },
+      "data": {
+        "status": 200,
+        "body": [
+          {
+            "key": "words",
+            "expr": "word_count"
+          },
+          {
+            "key": "top",
+            "expr": "top_words"
+          }
+        ]
+      },
+      "measured": {
+        "width": 230,
+        "height": 92
+      }
+    },
+    {
+      "id": "upload",
+      "type": "endpoint",
+      "position": {
+        "x": 40,
+        "y": 1540
+      },
+      "data": {
+        "method": "POST",
+        "path": "/upload",
+        "summary": "Загрузка файла"
+      },
+      "measured": {
+        "width": 230,
+        "height": 57
+      }
+    },
+    {
+      "id": "upload-in",
+      "type": "input",
+      "position": {
+        "x": 330,
+        "y": 1540
+      },
+      "data": {
+        "source": "form",
+        "fields": [
+          {
+            "name": "file",
+            "type": "file",
+            "required": true
+          },
+          {
+            "name": "comment",
+            "type": "str",
+            "required": false,
+            "default": ""
+          }
+        ]
+      },
+      "measured": {
+        "width": 230,
+        "height": 92
+      },
+      "selected": true
+    },
+    {
+      "id": "upload-out",
+      "type": "response",
+      "position": {
+        "x": 620,
+        "y": 1540
+      },
+      "data": {
+        "status": 200,
+        "body": [
+          {
+            "key": "filename",
+            "expr": "file['filename']"
+          },
+          {
+            "key": "size",
+            "expr": "file['size']"
+          },
+          {
+            "key": "comment",
+            "expr": "comment"
+          }
+        ]
+      },
+      "measured": {
+        "width": 230,
+        "height": 110
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "e-hello-hello-in",
+      "source": "hello",
+      "target": "hello-in"
+    },
+    {
+      "id": "e-hello-in-hello-logic",
+      "source": "hello-in",
+      "target": "hello-logic"
+    },
+    {
+      "id": "e-hello-logic-hello-out",
+      "source": "hello-logic",
+      "target": "hello-out"
+    },
+    {
+      "id": "e-create-create-in",
+      "source": "create",
+      "target": "create-in"
+    },
+    {
+      "id": "e-create-in-create-check",
+      "source": "create-in",
+      "target": "create-check"
+    },
+    {
+      "id": "e-create-check-create-logic",
+      "source": "create-check",
+      "target": "create-logic"
+    },
+    {
+      "id": "e-create-logic-create-db",
+      "source": "create-logic",
+      "target": "create-db"
+    },
+    {
+      "id": "e-create-db-create-out",
+      "source": "create-db",
+      "target": "create-out"
+    },
+    {
+      "id": "e-list-list-in",
+      "source": "list",
+      "target": "list-in"
+    },
+    {
+      "id": "e-list-in-list-db",
+      "source": "list-in",
+      "target": "list-db"
+    },
+    {
+      "id": "e-list-db-list-out",
+      "source": "list-db",
+      "target": "list-out"
+    },
+    {
+      "id": "e-get-get-in",
+      "source": "get",
+      "target": "get-in"
+    },
+    {
+      "id": "e-get-in-get-db",
+      "source": "get-in",
+      "target": "get-db"
+    },
+    {
+      "id": "e-get-db-get-if",
+      "source": "get-db",
+      "target": "get-if"
+    },
+    {
+      "id": "e-get-if-get-404",
+      "source": "get-if",
+      "target": "get-404",
+      "sourceHandle": "true"
+    },
+    {
+      "id": "e-get-if-get-200",
+      "source": "get-if",
+      "target": "get-200",
+      "sourceHandle": "false"
+    },
+    {
+      "id": "e-delete-delete-auth",
+      "source": "delete",
+      "target": "delete-auth"
+    },
+    {
+      "id": "e-delete-auth-delete-in",
+      "source": "delete-auth",
+      "target": "delete-in"
+    },
+    {
+      "id": "e-delete-in-delete-db",
+      "source": "delete-in",
+      "target": "delete-db"
+    },
+    {
+      "id": "e-delete-db-delete-if",
+      "source": "delete-db",
+      "target": "delete-if"
+    },
+    {
+      "id": "e-delete-if-delete-200",
+      "source": "delete-if",
+      "target": "delete-200",
+      "sourceHandle": "true"
+    },
+    {
+      "id": "e-delete-if-delete-404",
+      "source": "delete-if",
+      "target": "delete-404",
+      "sourceHandle": "false"
+    },
+    {
+      "id": "e-stats-stats-in",
+      "source": "stats",
+      "target": "stats-in"
+    },
+    {
+      "id": "e-stats-in-stats-check",
+      "source": "stats-in",
+      "target": "stats-check"
+    },
+    {
+      "id": "e-stats-check-stats-code",
+      "source": "stats-check",
+      "target": "stats-code"
+    },
+    {
+      "id": "e-stats-code-stats-out",
+      "source": "stats-code",
+      "target": "stats-out"
+    },
+    {
+      "id": "e-upload-upload-in",
+      "source": "upload",
+      "target": "upload-in"
+    },
+    {
+      "id": "e-upload-in-upload-out",
+      "source": "upload-in",
+      "target": "upload-out"
+    }
+  ],
+  "models": [
+    {
+      "name": "orders",
+      "fields": [
+        {
+          "name": "item",
+          "type": "str"
+        },
+        {
+          "name": "price",
+          "type": "float"
+        },
+        {
+          "name": "qty",
+          "type": "int"
+        },
+        {
+          "name": "total",
+          "type": "float"
+        },
+        {
+          "name": "status",
+          "type": "str"
+        }
+      ]
+    }
+  ],
+  "env": [
+    {
+      "key": "SHOP_NAME",
+      "value": "DragAPI Shop",
+      "secret": false
+    },
+    {
+      "key": "API_KEY",
+      "value": "dev-secret",
+      "secret": true
+    }
+  ],
+  "sandbox": {},
+  "libraries": {
+    "packages": [],
+    "only_binary": true
+  },
+  "viewport": null,
+  "id": "example-shop",
+  "updated": 1794923995.6928477
+}
