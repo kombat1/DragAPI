@@ -241,7 +241,7 @@ def test_schema_adds_new_columns(tmp_path):
 def test_platform_run_flow(tmp_path, monkeypatch):
     monkeypatch.setattr(storage, "DATA_DIR", tmp_path / "projects")
     monkeypatch.setattr(storage, "DB_DIR", tmp_path / "db")
-    c = TestClient(platform_app)
+    c = TestClient(platform_app, headers={"X-DragAPI": "1"})
     pid = c.post("/api/projects", json={"name": "Demo"}).json()["id"]
     body = {k: EXAMPLE[k] for k in ("name", "nodes", "edges", "models", "env")}
     assert c.put(f"/api/projects/{pid}", json=body).status_code == 200
@@ -346,7 +346,7 @@ def run(data, env):
 
 def test_sandbox_api(tmp_path, monkeypatch):
     monkeypatch.setattr(storage, "DATA_DIR", tmp_path / "projects")
-    c = TestClient(platform_app)
+    c = TestClient(platform_app, headers={"X-DragAPI": "1"})
     assert c.get("/api/sandbox").json()["backend"] in ("firejail", "process")
     pid = c.post("/api/projects", json={"name": "sbx"}).json()["id"]
     r = c.post(f"/api/projects/{pid}/sandbox/run", json={
@@ -643,7 +643,7 @@ def test_ingress_trust_proxy():
 def _platform(tmp_path, monkeypatch):
     monkeypatch.setattr(storage, "DATA_DIR", tmp_path / "projects")
     monkeypatch.setattr(storage, "DB_DIR", tmp_path / "db")
-    c = TestClient(platform_app)
+    c = TestClient(platform_app, headers={"X-DragAPI": "1"})
     pid = c.post("/api/projects", json={"name": "T"}).json()["id"]
     return c, pid
 
@@ -951,3 +951,91 @@ def test_rebuild_table_with_relation(tmp_path):
         db.insert("orders", {"qty": "1", "client_id": 42})
     with pytest.raises(DatabaseError):
         db.delete("customers", 1)
+
+
+# --- шаг 4а: пользователи и права ---
+
+def _auth_platform(tmp_path, monkeypatch):
+    monkeypatch.setenv("DRAGAPI_AUTH", "on")
+    monkeypatch.setattr(storage, "DATA_DIR", tmp_path / "projects")
+    monkeypatch.setattr(storage, "DB_DIR", tmp_path / "db")
+    return lambda: TestClient(platform_app, headers={"X-DragAPI": "1"})
+
+
+def test_auth_setup_login_roles(tmp_path, monkeypatch):
+    new = _auth_platform(tmp_path, monkeypatch)
+    storage.save("legacy-1", {"name": "Старый проект", "nodes": [], "edges": []})
+    admin = new()
+    assert admin.get("/api/projects").status_code == 401
+    assert admin.get("/api/auth/me").json() == {"auth": True, "user": None, "setup_required": True}
+    assert admin.post("/api/auth/setup", json={"username": "boss", "password": "short"}).status_code == 400
+    r = admin.post("/api/auth/setup", json={"username": "boss", "password": "very-secret-1"})
+    assert r.status_code == 200 and r.json()["user"]["role"] == "admin"
+    assert admin.post("/api/auth/setup", json={"username": "x", "password": "very-secret-1"}).status_code == 409
+    assert [p["id"] for p in admin.get("/api/projects").json()] == ["legacy-1"]  # старый проект — админу
+
+    admin.post("/api/users", json={"username": "ann", "password": "ann-password", "role": "user"})
+    admin.post("/api/users", json={"username": "bob", "password": "bob-password", "role": "user"})
+    ids = {u["username"]: u["id"] for u in admin.get("/api/users").json()}
+
+    ann = new()
+    assert ann.post("/api/auth/login", json={"username": "ann", "password": "wrong-pass"}).status_code == 401
+    assert ann.post("/api/auth/login", json={"username": "ANN", "password": "ann-password"}).status_code == 200
+    pid = ann.post("/api/projects", json={"name": "Проект Ann"}).json()["id"]
+    assert ann.get("/api/users").status_code == 403                        # не админ
+    assert ann.get(f"/api/projects/legacy-1").status_code == 404            # чужой проект «не существует»
+
+    bob = new()
+    bob.post("/api/auth/login", json={"username": "bob", "password": "bob-password"})
+    assert bob.get(f"/api/projects/{pid}").status_code == 404
+    assert ann.put(f"/api/projects/{pid}/members", json={"members": {ids["bob"]: "viewer"}}).status_code == 200
+    assert bob.get(f"/api/projects/{pid}").json()["my_role"] == "viewer"
+    assert bob.put(f"/api/projects/{pid}", json={"name": "взлом"}).status_code == 403
+    assert bob.post(f"/api/projects/{pid}/run").status_code == 403
+    assert bob.post(f"/api/projects/{pid}/schema/plan", json={"models": []}).status_code == 200  # только чтение
+    ann.put(f"/api/projects/{pid}/members", json={"members": {ids["bob"]: "editor"}})
+    assert bob.put(f"/api/projects/{pid}", json={"name": "правка"}).status_code == 200
+    assert bob.put(f"/api/projects/{pid}/members", json={"members": {}}).status_code == 403  # участниками — владелец
+    assert bob.delete(f"/api/projects/{pid}").status_code == 403
+    assert {p["id"]: p["role"] for p in bob.get("/api/projects").json()} == {pid: "editor"}
+    assert admin.get(f"/api/projects/{pid}").json()["my_role"] == "owner"  # админ видит всё
+
+    # смена пароля завершает сессии
+    assert admin.put(f"/api/users/{ids['bob']}/password", json={"password": "new-bob-pass"}).status_code == 200
+    assert bob.get("/api/projects").status_code == 401
+    assert ann.post("/api/auth/logout").status_code == 200 and ann.get("/api/projects").status_code == 401
+    assert admin.delete(f"/api/users/{ids['boss']}").status_code == 400  # самого себя
+
+
+def test_auth_csrf_and_bruteforce(tmp_path, monkeypatch):
+    new = _auth_platform(tmp_path, monkeypatch)
+    c = new()
+    c.post("/api/auth/setup", json={"username": "boss", "password": "very-secret-1"})
+    plain = TestClient(platform_app, cookies=dict(c.cookies))
+    assert plain.post("/api/projects", json={"name": "x"}).status_code == 403   # нет X-DragAPI
+    assert plain.get("/api/projects").status_code == 200                        # чтение — можно
+    attacker = new()
+    for _ in range(5):
+        assert attacker.post("/api/auth/login", json={"username": "boss", "password": "nope-nope"}).status_code == 401
+    assert attacker.post("/api/auth/login", json={"username": "boss", "password": "very-secret-1"}).status_code == 429
+
+
+def test_auth_password_storage(tmp_path):
+    from app import auth
+    s = auth.AuthStore(tmp_path)
+    s.create_user("user1", "password-123")
+    raw = (tmp_path / "users.json").read_text()
+    assert "password-123" not in raw and "scrypt$" in raw
+    assert oct((tmp_path / "users.json").stat().st_mode)[-3:] == "600"
+    token, _ = s.login("user1", "password-123", "1.1.1.1")
+    assert token not in (tmp_path / "sessions.json").read_text()  # хранится только хэш токена
+
+
+def test_preview_api_stays_public_with_auth(tmp_path, monkeypatch):
+    new = _auth_platform(tmp_path, monkeypatch)
+    c = new()
+    c.post("/api/auth/setup", json={"username": "boss", "password": "very-secret-1"})
+    pid = c.post("/api/projects", json={"name": "p"}).json()["id"]
+    c.put(f"/api/projects/{pid}", json=_graph_body())
+    c.post(f"/api/projects/{pid}/run")
+    assert TestClient(platform_app).get(f"/run/{pid}/hello").status_code == 200

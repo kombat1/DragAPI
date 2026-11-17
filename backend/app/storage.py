@@ -13,9 +13,10 @@ import uuid
 from pathlib import Path
 
 from . import vault
+from .paths import DATA
 
-DATA_DIR = Path(__file__).resolve().parent.parent / "data" / "projects"
-DB_DIR = Path(__file__).resolve().parent.parent / "data" / "db"
+DATA_DIR = DATA / "projects"
+DB_DIR = DATA / "db"
 EXAMPLES_DIR = Path(__file__).resolve().parent.parent / "examples"
 ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 MAX_VERSIONS = 30

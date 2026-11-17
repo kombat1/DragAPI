@@ -1,9 +1,14 @@
 async function request(method, url, body) {
+  const headers = { 'X-DragAPI': '1' } // защита от CSRF: чужой сайт не может выставить этот заголовок
+  if (body !== undefined) headers['Content-Type'] = 'application/json'
   const res = await fetch(url, {
     method,
-    headers: body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
+    headers,
     body: body !== undefined ? JSON.stringify(body) : undefined,
   })
+  if (res.status === 401 && !url.startsWith('/api/auth/')) {
+    window.dispatchEvent(new Event('dragapi:unauthorized'))
+  }
   const text = await res.text()
   let data
   try {
@@ -21,6 +26,18 @@ async function request(method, url, body) {
 }
 
 export const api = {
+  me: () => request('GET', '/api/auth/me'),
+  setup: (username, password) => request('POST', '/api/auth/setup', { username, password }),
+  login: (username, password) => request('POST', '/api/auth/login', { username, password }),
+  logout: () => request('POST', '/api/auth/logout'),
+  changePassword: (old_password, password) => request('POST', '/api/auth/password', { old_password, password }),
+  users: () => request('GET', '/api/users'),
+  usersBrief: () => request('GET', '/api/users/brief'),
+  createUser: (u) => request('POST', '/api/users', u),
+  deleteUser: (id) => request('DELETE', `/api/users/${id}`),
+  resetPassword: (id, password) => request('PUT', `/api/users/${id}/password`, { password }),
+  members: (pid) => request('GET', `/api/projects/${pid}/members`),
+  setMembers: (pid, members) => request('PUT', `/api/projects/${pid}/members`, { members }),
   blocks: () => request('GET', '/api/blocks'),
   projects: () => request('GET', '/api/projects'),
   createProject: (name) => request('POST', '/api/projects', { name }),

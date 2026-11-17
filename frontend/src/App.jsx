@@ -18,6 +18,7 @@ import BlockNode from './components/BlockNode.jsx'
 import Inspector from './components/Inspector.jsx'
 import BottomPanel from './components/BottomPanel.jsx'
 import ProjectSettings from './components/ProjectSettings.jsx'
+import { LoginScreen, MembersModal, UserMenu } from './components/Auth.jsx'
 import { DEFAULT_FIREWALL, normalizeFirewall } from './components/FirewallTab.jsx'
 import { newId } from './components/ProjectSettings.jsx'
 
@@ -108,7 +109,10 @@ function Palette({ catalog }) {
   )
 }
 
-function Editor({ catalog, projectId, onProjectsChanged }) {
+function Editor({ catalog, projectId, onProjectsChanged, me }) {
+  const [role, setRole] = useState('owner')
+  const readOnly = role === 'viewer'
+  const [membersOpen, setMembersOpen] = useState(false)
   const [name, setName] = useState('')
   const [nodes, setNodes] = useState([])
   const [edges, setEdges] = useState([])
@@ -161,6 +165,7 @@ function Editor({ catalog, projectId, onProjectsChanged }) {
       setLibraries({ packages: [], only_binary: true, ...(p.libraries || {}) })
       setFirewall(normalizeFirewall(p.firewall, p.sandbox?.network))
       setTests(p.tests || [])
+      setRole(p.my_role || 'owner')
       setDebug(null)
       setSelectedId(null)
       setDirty(false)
@@ -205,12 +210,13 @@ function Editor({ catalog, projectId, onProjectsChanged }) {
     const h = (e) => {
       if ((e.ctrlKey || e.metaKey) && e.key === 's') {
         e.preventDefault()
+        if (readOnly) return
         save().then(() => notify('Сохранено'))
       }
     }
     window.addEventListener('keydown', h)
     return () => window.removeEventListener('keydown', h)
-  }, [save, notify])
+  }, [save, notify, readOnly])
 
   const run = async () => {
     try {
@@ -376,8 +382,10 @@ function Editor({ catalog, projectId, onProjectsChanged }) {
   return (
     <div className="editor">
       <header className="toolbar">
+        {readOnly && <span className="readonly-badge" title="Изменения не сохраняются">👁 Только просмотр</span>}
         <input
           className="project-name"
+          disabled={readOnly}
           value={name}
           onChange={(e) => {
             setName(e.target.value)
@@ -395,10 +403,15 @@ function Editor({ catalog, projectId, onProjectsChanged }) {
         >
           ⚙ Настройки проекта
         </button>
-        <button onClick={() => save().then(() => notify('Сохранено'))} disabled={!dirty}>
+        {me && role === 'owner' && (
+          <button onClick={() => setMembersOpen(true)} title="Кто имеет доступ к проекту">
+            👥 Доступ
+          </button>
+        )}
+        <button onClick={() => save().then(() => notify('Сохранено'))} disabled={!dirty || readOnly}>
           {dirty ? 'Сохранить' : 'Сохранено'}
         </button>
-        <button className="primary" onClick={run} disabled={errors > 0}>
+        <button className="primary" onClick={run} disabled={errors > 0 || readOnly}>
           {running ? 'Перезапустить' : '▶ Запустить'}
         </button>
         {running && (
@@ -406,7 +419,9 @@ function Editor({ catalog, projectId, onProjectsChanged }) {
             <a className="button" href={running.docs_url} target="_blank" rel="noreferrer">
               Swagger ↗
             </a>
-            <button onClick={stop}>■ Стоп</button>
+            <button onClick={stop} disabled={readOnly}>
+              ■ Стоп
+            </button>
           </>
         )}
         <button onClick={exportZip} disabled={errors > 0} title="Скачать обычное FastAPI-приложение">
@@ -415,7 +430,7 @@ function Editor({ catalog, projectId, onProjectsChanged }) {
       </header>
 
       <div className="workspace">
-        <Palette catalog={catalog} />
+        {!readOnly && <Palette catalog={catalog} />}
         <div className="canvas" ref={wrapper} onDragOver={(e) => e.preventDefault()} onDrop={onDrop}>
           <ReactFlow
             nodes={viewNodes}
@@ -429,7 +444,9 @@ function Editor({ catalog, projectId, onProjectsChanged }) {
             onNodeClick={(_, n) => setSelectedId(n.id)}
             onPaneClick={() => setSelectedId(null)}
             onNodesDelete={() => setSelectedId(null)}
-            deleteKeyCode={['Delete', 'Backspace']}
+            deleteKeyCode={readOnly ? null : ['Delete', 'Backspace']}
+            nodesDraggable={!readOnly}
+            nodesConnectable={!readOnly}
             defaultEdgeOptions={{ style: { strokeWidth: 2 } }}
             colorMode="system"
             defaultViewport={{ x: 0, y: 0, zoom: 1 }}
@@ -441,6 +458,7 @@ function Editor({ catalog, projectId, onProjectsChanged }) {
           {toast && <div className={`toast ${toast.kind}`}>{toast.text}</div>}
         </div>
         <Inspector
+          readOnly={readOnly}
           node={selected}
           issues={selected ? issuesByNode[selected.id] || [] : []}
           availableFields={selected ? fieldsBefore(selected.id, nodes, edges) : []}
@@ -481,10 +499,13 @@ function Editor({ catalog, projectId, onProjectsChanged }) {
             markDirty()
           },
           onDebug: setDebug,
+          readOnly,
         }}
       />
+      {membersOpen && <MembersModal projectId={projectId} me={me} onClose={() => setMembersOpen(false)} />}
       {settingsOpen && (
         <ProjectSettings
+          readOnly={readOnly}
           projectId={projectId}
           initialTab={settingsOpen}
           project={{ models, env, sandbox, libraries, firewall }}
@@ -512,6 +533,27 @@ function Editor({ catalog, projectId, onProjectsChanged }) {
 }
 
 export default function App() {
+  const [session, setSession] = useState(null) // {auth, user, setup_required}
+  useEffect(() => {
+    const check = () => api.me().then(setSession).catch(() => setSession({ error: true }))
+    check()
+    window.addEventListener('dragapi:unauthorized', check)
+    return () => window.removeEventListener('dragapi:unauthorized', check)
+  }, [])
+  if (!session) return <div className="fatal">Загрузка…</div>
+  if (session.error) return <div className="fatal">Бэкенд недоступен. Запустите: cd backend && .venv/bin/uvicorn app.main:app --port 8765</div>
+  if (session.auth && !session.user) {
+    return (
+      <LoginScreen
+        setup={session.setup_required}
+        onDone={(user) => setSession({ ...session, user, setup_required: false })}
+      />
+    )
+  }
+  return <Workspace key={session.user?.id || 'local'} me={session.user} onLogout={() => setSession({ ...session, user: null })} />
+}
+
+function Workspace({ me, onLogout }) {
   const [catalog, setCatalog] = useState(null)
   const [projects, setProjects] = useState([])
   const [projectId, setProjectId] = useState(() => {
@@ -580,21 +622,24 @@ export default function App() {
             {projects.map((p) => (
               <option key={p.id} value={p.id}>
                 {p.name}
+                {p.role && p.role !== 'owner' ? ` (${{ editor: 'редактор', viewer: 'просмотр' }[p.role]})` : ''}
               </option>
             ))}
           </select>
           <button className="small" onClick={createProject}>
             + Проект
           </button>
-          {projectId && (
+          {projectId && (!me || projects.find((p) => p.id === projectId)?.role === 'owner') && (
             <button className="small danger" onClick={deleteProject}>
               Удалить
             </button>
           )}
+          <div className="spacer" />
+          {me && <UserMenu me={me} onLogout={onLogout} />}
         </nav>
         {projectId ? (
           <ReactFlowProvider key={`${projectId}-${reloadKey}`}>
-            <Editor catalog={catalog} projectId={projectId} onProjectsChanged={loadProjects} />
+            <Editor catalog={catalog} projectId={projectId} onProjectsChanged={loadProjects} me={me} />
           </ReactFlowProvider>
         ) : (
           <div className="fatal">

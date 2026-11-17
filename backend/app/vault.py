@@ -14,8 +14,9 @@ import os
 from pathlib import Path
 
 from cryptography.fernet import Fernet, InvalidToken
+from .paths import DATA
 
-KEY_PATH = Path(__file__).resolve().parent.parent / "data" / "secret.key"
+KEY_PATH = DATA / "secret.key"
 _fernet: Fernet | None = None
 
 

@@ -430,7 +430,7 @@ function LibrariesTab({ projectId, libraries, setLibraries, sandbox, onInstalled
   )
 }
 
-export default function ProjectSettings({ projectId, project, setProject, issues, sandboxInfo, onClose, onInstalled, initialTab }) {
+export default function ProjectSettings({ projectId, project, setProject, issues, sandboxInfo, onClose, onInstalled, initialTab, readOnly = false }) {
   const [tab, setTab] = useState(initialTab || 'models')
 
   useEffect(() => {
@@ -475,7 +475,7 @@ export default function ProjectSettings({ projectId, project, setProject, issues
           </div>
         )}
 
-        <div className="settings-body">
+        <fieldset className="settings-body" disabled={readOnly}>
           {tab === 'models' && (
             <ModelsTab projectId={projectId} models={project.models} setModels={(models) => setProject({ models })} />
           )}
@@ -504,7 +504,7 @@ export default function ProjectSettings({ projectId, project, setProject, issues
               onInstalled={onInstalled}
             />
           )}
-        </div>
+        </fieldset>
 
         <div className="modal-foot">
           <span className="muted">Изменения применяются сразу; не забудьте сохранить проект (Ctrl+S).</span>

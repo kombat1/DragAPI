@@ -23,8 +23,9 @@ import shutil
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from .paths import DATA
 
-ENVS_DIR = Path(__file__).resolve().parent.parent / "data" / "envs"
+ENVS_DIR = DATA / "envs"
 PYTHON = "/usr/bin/python3" if os.path.exists("/usr/bin/python3") else "python3"
 INSTALL_TIMEOUT = 15 * 60
 MAX_LOG = 60_000

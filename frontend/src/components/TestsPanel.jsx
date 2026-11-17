@@ -195,7 +195,7 @@ function ResultView({ result, step, setStep, nodes }) {
   )
 }
 
-export default function TestsPanel({ projectId, graph, routes, focusEndpoint, tests, setTests, onDebug }) {
+export default function TestsPanel({ projectId, graph, routes, focusEndpoint, tests, setTests, onDebug, readOnly = false }) {
   const { nodes, edges } = graph
   const [endpoint, setEndpoint] = useState(focusEndpoint || routes[0]?.node_id || '')
   const [drafts, setDrafts] = useState({})
@@ -278,6 +278,7 @@ export default function TestsPanel({ projectId, graph, routes, focusEndpoint, te
   const resultsById = Object.fromEntries((run?.results || []).map((r) => [r.id, r]))
   const updateTest = (id, patch) => setTests(tests.map((t) => (t.id === id ? { ...t, ...patch } : t)))
 
+  if (readOnly) return <div className="muted pad">Тестовые запросы меняют данные превью — нужна роль редактора.</div>
   if (!routes.length) return <div className="muted pad">В графе нет работающих эндпоинтов — исправьте ошибки во вкладке «Проблемы».</div>
 
   return (

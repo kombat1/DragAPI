@@ -281,7 +281,7 @@ const AUTH_SCHEMES = {
   bearer: 'Bearer-токен (Authorization)',
 }
 
-export default function Inspector({ node, onChange, onDelete, issues, availableFields, models, env, sandbox, firewall, projectId, onOpenSettings, onTestEndpoint, sandboxInfo }) {
+export default function Inspector({ node, onChange, onDelete, issues, availableFields, models, env, sandbox, firewall, projectId, onOpenSettings, onTestEndpoint, sandboxInfo, readOnly = false }) {
   const [errorLine, setErrorLine] = useState(null)
   const [editorMode, setEditorModeState] = useState(loadEditorMode) // null | 'half' | 'full'
   const setEditorMode = (mode) => {
@@ -316,7 +316,7 @@ export default function Inspector({ node, onChange, onDelete, issues, availableF
   const refFields = model ? model.fields.filter((f) => f.type === 'ref' && f.name) : []
 
   return (
-    <div className={`inspector ${node.type === 'code' ? 'wide' : ''}`}>
+    <fieldset disabled={readOnly} className={`inspector ${node.type === 'code' ? 'wide' : ''}`}>
       <div className="inspector-head" style={{ '--accent': spec.color }}>
         <div>
           <div className="inspector-title">{spec.title}</div>
@@ -644,7 +644,7 @@ export default function Inspector({ node, onChange, onDelete, issues, availableF
               </div>
             ) : (
               <Suspense fallback={<div className="muted">Загрузка редактора…</div>}>
-                <CodeEditor key={node.id} value={d.code || ''} onChange={(code) => set({ code })} errorLine={errorLine} />
+                <CodeEditor key={node.id} readOnly={readOnly} value={d.code || ''} onChange={(code) => set({ code })} errorLine={errorLine} />
               </Suspense>
             )}
           </Field>
@@ -722,6 +722,6 @@ export default function Inspector({ node, onChange, onDelete, issues, availableF
           ))}
         </div>
       )}
-    </div>
+    </fieldset>
   )
 }

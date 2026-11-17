@@ -9,7 +9,7 @@ const dark = () => window.matchMedia?.('(prefers-color-scheme: dark)').matches
 
 // Редактор Python для блока «Python-код». Неконтролируемый: внешнее значение
 // применяется только когда оно отличается от текста редактора (смена блока, откат версии).
-export default function CodeEditor({ value, onChange, errorLine, fill = false }) {
+export default function CodeEditor({ value, onChange, errorLine, fill = false, readOnly = false }) {
   const host = useRef(null)
   const view = useRef(null)
   const onChangeRef = useRef(onChange)
@@ -24,6 +24,7 @@ export default function CodeEditor({ value, onChange, errorLine, fill = false })
         keymap.of([indentWithTab]),
         python(),
         EditorView.lineWrapping,
+        EditorView.editable.of(!readOnly),
         ...(dark() ? [oneDark] : []),
         EditorView.theme({ '&': { fontSize: '12px' }, '.cm-scroller': { fontFamily: 'var(--mono)' } }),
         EditorView.updateListener.of((u) => {

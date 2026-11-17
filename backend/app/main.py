@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import io
+import re
 import zipfile
 from collections import deque
 from contextlib import asynccontextmanager
@@ -16,13 +17,13 @@ import time
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, JSONResponse as FastJSON, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.responses import JSONResponse
 from starlette.routing import Mount, Router
 
-from . import codegen, sandbox, storage, testing, vault
+from . import auth, codegen, sandbox, storage, testing, vault
 from .pyenv import envs, validate_packages
 from .blocks import catalog
 from .graph import CompiledProject, GraphError, compile_project
@@ -39,8 +40,185 @@ async def lifespan(_app):
     yield
 
 
-app = FastAPI(title="DragAPI", version="0.3.0", lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+app = FastAPI(title="DragAPI", version="0.4.0", lifespan=lifespan)
+
+# ---------- вход и права ----------
+
+PUBLIC_API = {"/api/auth/me", "/api/auth/login", "/api/auth/setup", "/api/auth/logout"}
+PROJECT_PATH = re.compile(r"^/api/projects/([^/]+)(/.*)?$")
+
+
+@app.middleware("http")
+async def access_control(request: Request, call_next):
+    path = request.url.path
+    request.state.user = None
+    if not path.startswith("/api/"):
+        return await call_next(request)  # фронтенд и превью-API /run/... — публичные
+    if request.method not in ("GET", "HEAD", "OPTIONS") and request.headers.get("x-dragapi") != "1":
+        # браузер не даст чужому сайту выставить этот заголовок — защита от CSRF
+        return FastJSON({"detail": "нет заголовка X-DragAPI"}, status_code=403)
+    if not auth.enabled():
+        return await call_next(request)
+    user = auth.store.user_by_token(request.cookies.get(auth.COOKIE))
+    request.state.user = user
+    if path in PUBLIC_API:
+        return await call_next(request)
+    if user is None:
+        return FastJSON({"detail": "нужно войти"}, status_code=401)
+    if path.startswith("/api/users") and not path.startswith("/api/users/brief") and user["role"] != "admin":
+        return FastJSON({"detail": "только для администратора"}, status_code=403)
+    m = PROJECT_PATH.match(path)
+    if m:
+        role = auth.store.role_for(user, m.group(1))
+        if role is None:
+            return FastJSON({"detail": "проект не найден"}, status_code=404)  # не раскрываем существование
+        need = auth.required_level(request.method, m.group(2) or "")
+        if auth.RANK[role] < auth.RANK[need]:
+            return FastJSON({"detail": f"недостаточно прав: нужна роль {need}, у вас {role}"}, status_code=403)
+        request.state.role = role
+    return await call_next(request)
+
+
+def _user(request: Request) -> dict | None:
+    return getattr(request.state, "user", None)
+
+
+class Credentials(BaseModel):
+    username: str
+    password: str
+
+
+class NewUser(Credentials):
+    role: str = "user"
+
+
+class PasswordIn(BaseModel):
+    password: str
+    old_password: str | None = None
+
+
+def _auth_error(e: auth.AuthError):
+    raise HTTPException(e.status, str(e)) from None
+
+
+def _set_session(response: Response, token: str):
+    response.set_cookie(auth.COOKIE, token, max_age=auth.SESSION_TTL, httponly=True, samesite="lax",
+                        secure=False, path="/")
+
+
+@app.get("/api/auth/me")
+def auth_me(request: Request):
+    if not auth.enabled():
+        return {"auth": False, "user": None, "setup_required": False}
+    return {"auth": True, "user": auth.store.public(_user(request)), "setup_required": auth.store.setup_required()}
+
+
+@app.post("/api/auth/setup")
+def auth_setup(body: Credentials, response: Response, request: Request):
+    """Первый запуск: создать администратора. Все существующие проекты переходят к нему."""
+    if not auth.store.setup_required():
+        raise HTTPException(409, "администратор уже создан")
+    try:
+        user = auth.store.create_user(body.username, body.password, "admin")
+        token, _ = auth.store.login(body.username, body.password, request.client.host if request.client else "")
+    except auth.AuthError as e:
+        _auth_error(e)
+    auth.store.claim_orphans([p["id"] for p in storage.list_projects()], user["id"])
+    _set_session(response, token)
+    return {"user": auth.store.public(user)}
+
+
+@app.post("/api/auth/login")
+def auth_login(body: Credentials, response: Response, request: Request):
+    try:
+        token, user = auth.store.login(body.username, body.password, request.client.host if request.client else "")
+    except auth.AuthError as e:
+        _auth_error(e)
+    _set_session(response, token)
+    return {"user": auth.store.public(user)}
+
+
+@app.post("/api/auth/logout")
+def auth_logout(response: Response, request: Request):
+    auth.store.logout(request.cookies.get(auth.COOKIE))
+    response.delete_cookie(auth.COOKIE, path="/")
+    return {"ok": True}
+
+
+@app.post("/api/auth/password")
+def auth_password(body: PasswordIn, request: Request):
+    user = _user(request)
+    if user is None:
+        raise HTTPException(400, "вход выключен")
+    if not auth.verify_password(body.old_password or "", user["password"]):
+        raise HTTPException(403, "текущий пароль неверен")
+    try:
+        auth.store.set_password(user["id"], body.password)
+    except auth.AuthError as e:
+        _auth_error(e)
+    return {"ok": True}
+
+
+@app.get("/api/users")
+def users_list():
+    return [auth.store.public(u) for u in auth.store.users()]
+
+
+@app.get("/api/users/brief")
+def users_brief():
+    """Имена пользователей — чтобы выбрать, с кем поделиться проектом."""
+    return [{"id": u["id"], "username": u["username"]} for u in auth.store.users()]
+
+
+@app.post("/api/users")
+def users_create(body: NewUser):
+    try:
+        return auth.store.public(auth.store.create_user(body.username, body.password, body.role))
+    except auth.AuthError as e:
+        _auth_error(e)
+
+
+@app.delete("/api/users/{user_id}")
+def users_delete(user_id: str, request: Request):
+    if _user(request) and _user(request)["id"] == user_id:
+        raise HTTPException(400, "нельзя удалить самого себя")
+    try:
+        auth.store.delete_user(user_id)
+    except auth.AuthError as e:
+        _auth_error(e)
+    return {"ok": True}
+
+
+@app.put("/api/users/{user_id}/password")
+def users_reset_password(user_id: str, body: PasswordIn):
+    try:
+        auth.store.set_password(user_id, body.password)
+    except auth.AuthError as e:
+        _auth_error(e)
+    return {"ok": True}
+
+
+class MembersIn(BaseModel):
+    members: dict[str, str]  # user_id -> editor | viewer
+
+
+@app.get("/api/projects/{pid}/members")
+def project_members(pid: str):
+    _load(pid)
+    return auth.store.members(pid)
+
+
+@app.put("/api/projects/{pid}/members")
+def project_set_members(pid: str, body: MembersIn):
+    _load(pid)
+    try:
+        auth.store.set_members(pid, body.members)
+    except auth.AuthError as e:
+        _auth_error(e)
+    return auth.store.members(pid)
+
+
+# ---------- проекты ----------
 
 
 class LiveRunner:
@@ -307,13 +485,22 @@ def libraries_remove(pid: str):
 
 
 @app.get("/api/projects")
-def projects():
-    return storage.list_projects()
+def projects(request: Request):
+    user = _user(request)
+    out = []
+    for p in storage.list_projects():
+        role = auth.store.role_for(user, p["id"])
+        if role:
+            out.append({**p, "role": role})
+    return out
 
 
 @app.post("/api/projects")
-def create_project(body: CreateIn):
-    return storage.create(body.name.strip() or "Новый проект")
+def create_project(body: CreateIn, request: Request):
+    project = storage.create(body.name.strip() or "Новый проект")
+    if _user(request):
+        auth.store.set_owner(project["id"], _user(request)["id"])
+    return project
 
 
 def _with_secrets(pid: str, graph: dict) -> dict:
@@ -326,9 +513,10 @@ def _with_secrets(pid: str, graph: dict) -> dict:
 
 
 @app.get("/api/projects/{pid}")
-def get_project(pid: str):
+def get_project(pid: str, request: Request):
     project = _load(pid)
-    return {**project, "env": vault.mask_env(project.get("env")), "running": pid in runner.apps}
+    role = getattr(request.state, "role", None) or auth.store.role_for(_user(request), pid)
+    return {**project, "env": vault.mask_env(project.get("env")), "running": pid in runner.apps, "my_role": role}
 
 
 @app.put("/api/projects/{pid}")
@@ -346,6 +534,7 @@ def delete_project(pid: str):
         storage.delete(pid)
     except storage.NotFound:
         raise HTTPException(404, "проект не найден") from None
+    auth.store.forget_project(pid)
     return {"ok": True}
 
 

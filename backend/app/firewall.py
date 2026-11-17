@@ -27,8 +27,9 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
+from .paths import DATA
 
-FW_DIR = Path(__file__).resolve().parent.parent / "data" / "fw"
+FW_DIR = DATA / "fw"
 EGRESS_MODES = ("off", "filtered", "open")
 HOST_RE = re.compile(r"^(\*|(\*\.)?([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)$")
 MAX_RULES = 200
