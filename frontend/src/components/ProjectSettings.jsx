@@ -181,6 +181,11 @@ function EnvTab({ env, setEnv }) {
 const BACKENDS = [
   ['auto', 'Автоматически', 'firejail, если установлен; иначе обычный процесс'],
   ['firejail', 'firejail', 'изоляция: свой сетевой стек, файлы платформы и $HOME не видны, seccomp, без capabilities'],
+  [
+    'docker',
+    'Docker-контейнер',
+    'строже всего: одноразовый контейнер на вызов, ФС только для чтения, пользователь nobody, лимиты cgroup; gVisor, если установлен. Медленнее: ~0.5–1 с на вызов',
+  ],
   ['process', 'Обычный процесс', 'только лимиты памяти/CPU/файлов — сеть и файлы доступны. Для отладки'],
 ]
 
@@ -197,7 +202,8 @@ function SandboxTab({ sandbox, setSandbox, info, goTo }) {
       <div className="field-label">Изоляция</div>
       <div className="radio-cards">
         {BACKENDS.map(([value, title, desc]) => {
-          const disabled = value === 'firejail' && info && !info.firejail_available
+          const disabled =
+            (value === 'firejail' && info && !info.firejail_available) || (value === 'docker' && info && !info.docker?.available)
           return (
             <label key={value} className={`radio-card ${s.backend === value ? 'checked' : ''} ${disabled ? 'disabled' : ''}`}>
               <input
@@ -210,6 +216,10 @@ function SandboxTab({ sandbox, setSandbox, info, goTo }) {
               <div>
                 <b>{title}</b>
                 {disabled && <span className="weak-text"> — не установлен</span>}
+                {value === 'docker' && info?.docker?.available && !info.docker.image && (
+                  <span className="weak-text"> — нужен образ: docker pull python:3.12-slim</span>
+                )}
+                {value === 'docker' && info?.docker?.gvisor && <span className="muted"> · gVisor</span>}
                 <div className="muted">{desc}</div>
               </div>
             </label>

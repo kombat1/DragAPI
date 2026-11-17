@@ -382,7 +382,7 @@ def test_validate_packages(line, ok):
 def test_sandbox_settings_parse():
     s, errors = SandboxSettings.parse({"backend": "firejail", "network": True, "max_file_mb": 5})
     assert not errors and s.network and s.max_file_mb == 5
-    _, errors = SandboxSettings.parse({"backend": "docker", "max_open_files": 3})
+    _, errors = SandboxSettings.parse({"backend": "kubernetes", "max_open_files": 3})
     assert len(errors) == 2
     assert "песочница" in _issues(_graph_with(lambda g: g.update(sandbox={"backend": "nope"})))
     assert "библиотеки" in _issues(_graph_with(lambda g: g.update(libraries={"packages": ["-r x.txt"]})))
@@ -1100,3 +1100,98 @@ def test_real_docker_deploy(tmp_path, monkeypatch):
             assert json.loads(r.read())["message"].startswith("Hello, CI!")
     finally:
         asyncio.run(manager.stop("pytestdeploy", remove_data=True))
+
+
+# --- шаг 4в: Docker-песочница ---
+
+needs_docker = pytest.mark.skipif(not (sandbox.docker_info()["available"] and sandbox.docker_info()["image"]),
+                                  reason="нужен Docker и образ " + sandbox.DOCKER_IMAGE)
+DOCKER = SandboxSettings(backend="docker")
+
+
+@needs_docker
+def test_docker_sandbox_isolation():
+    import asyncio
+    code = """
+import os, socket, threading
+def attempt(fn):
+    try:
+        return fn()
+    except Exception as e:
+        return type(e).__name__
+def run(data, env):
+    return {
+        "uid": os.getuid(),
+        "net": attempt(lambda: socket.create_connection(("1.1.1.1", 80), timeout=1) and "open"),
+        "write_root": attempt(lambda: open("/app.txt", "w") and "written"),
+        "write_tmp": attempt(lambda: open("/tmp/x.txt", "w").write("ok")),
+        "thread": attempt(lambda: threading.Thread(target=lambda: None).start() or "started"),
+        "host_files": os.path.exists("/home/kombat") or os.path.exists("/etc/hostname-of-host"),
+        "x": data["x"] * 2, "k": env["K"],
+    }
+"""
+    r = asyncio.run(sandbox.run_code(code, {"x": 21}, {"K": "v"}, settings=DOCKER))
+    assert r.ok and r.backend == "docker", r.error
+    res = r.result
+    assert res["uid"] == 65534 and res["net"] == "OSError" and res["write_root"] == "OSError"
+    assert res["write_tmp"] == 2 and res["thread"] == "RuntimeError" and res["host_files"] is False
+    assert res["x"] == 42 and res["k"] == "v"
+
+
+@needs_docker
+def test_docker_sandbox_timeout_and_memory():
+    import asyncio
+    import subprocess
+    r = asyncio.run(sandbox.run_code("def run(data, env):\n    while True: pass", {}, {},
+                                     sandbox.Limits(timeout=1), settings=DOCKER))
+    assert not r.ok and ("превышено время" in r.error or "лимит CPU" in r.error), r.error
+    r = asyncio.run(sandbox.run_code("def run(data, env):\n    return {'n': len(bytearray(400 * 1024 * 1024))}",
+                                     {}, {}, sandbox.Limits(timeout=5, memory_mb=128), settings=DOCKER))
+    assert not r.ok, r
+    left = subprocess.run(["docker", "ps", "-aq", "--filter", "label=dragapi.sandbox=1"], capture_output=True, text=True)
+    assert left.stdout.strip() == "", "контейнеры песочницы не должны оставаться"
+
+
+@needs_docker
+def test_docker_sandbox_firewall_filtered():
+    import asyncio
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"ok")
+
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    port = server.server_address[1]
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    fw = FirewallSettings(egress=_policy([{"action": "allow", "target": "api.test", "ports": str(port)}], "deny",
+                                         hosts={"api.test": ["127.0.0.1"], "evil.test": ["127.0.0.1"]}))
+    code = f"""
+import urllib.request
+def get(url):
+    try:
+        return urllib.request.urlopen(url, timeout=5).read().decode()
+    except Exception as e:
+        return type(e).__name__
+def run(data, env):
+    return {{"ok": get("http://api.test:{port}/"), "denied": get("http://evil.test:{port}/")}}
+"""
+    r = asyncio.run(sandbox.run_code(code, {}, {}, sandbox.Limits(timeout=5), settings=DOCKER, firewall=fw))
+    server.shutdown()
+    assert r.ok, r.error
+    assert r.result == {"ok": "ok", "denied": "HTTPError"}
+
+
+def test_docker_backend_describe():
+    d = sandbox.describe(SandboxSettings(backend="docker"))
+    if sandbox.docker_info()["available"]:
+        assert d["backend"] == "docker" and "контейнер" in d["details"]
+    else:
+        assert d["backend"] != "docker" and "Docker недоступен" in d["warning"]

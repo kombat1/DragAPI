@@ -20,6 +20,8 @@ import secrets
 import shutil
 import sys
 import tempfile
+from pathlib import Path
+import time
 from dataclasses import dataclass
 
 PYTHON = "/usr/bin/python3" if os.path.exists("/usr/bin/python3") else sys.executable
@@ -41,6 +43,8 @@ WORKER = r'''
 import io, json, sys, traceback
 req = json.loads(sys.stdin.read())
 nonce = req.pop("nonce")
+if req.pop("site_dir", None):
+    sys.path.insert(0, "/opt/site")
 if req.get("proxy"):
     exec(req.pop("proxy_setup"), {"PROXY_PATH": req.pop("proxy")})
 if req.pop("limit_nproc", False):
@@ -179,13 +183,15 @@ class Limits:
     memory_mb: int = 256
 
 
-BACKENDS = ("auto", "firejail", "process")
+BACKENDS = ("auto", "firejail", "docker", "process")
+DOCKER_IMAGE = f"python:{sys.version_info.major}.{sys.version_info.minor}-slim"  # та же версия, что у venv проекта
+_docker_cache: dict = {"t": 0.0, "value": None}
 
 
 @dataclass
 class SandboxSettings:
     """Настройки песочницы проекта (вкладка «Песочница» в настройках проекта)."""
-    backend: str = "auto"         # auto | firejail | process
+    backend: str = "auto"         # auto | firejail | docker | process
     network: bool = False         # разрешить коду сеть
     threads: bool = False         # разрешить потоки и подпроцессы (нужно многим библиотекам)
     max_file_mb: int = 1          # максимальный размер файла, который код может записать (во временный каталог)
@@ -221,13 +227,38 @@ def firejail_available() -> bool:
     return shutil.which("firejail") is not None
 
 
+def docker_info() -> dict:
+    """Доступен ли Docker, есть ли образ и gVisor (кэш на 30 с)."""
+    import subprocess
+    now = time.monotonic()
+    if _docker_cache["value"] is not None and now - _docker_cache["t"] < 30:
+        return _docker_cache["value"]
+    info = {"available": False, "image": False, "gvisor": False}
+    if shutil.which("docker"):
+        try:
+            r = subprocess.run(["docker", "info", "--format", "{{range $k, $v := .Runtimes}}{{$k}} {{end}}"],
+                               capture_output=True, text=True, timeout=5)
+            if r.returncode == 0:
+                info["available"] = True
+                info["gvisor"] = "runsc" in r.stdout.split()
+                info["image"] = subprocess.run(["docker", "image", "inspect", DOCKER_IMAGE], capture_output=True,
+                                               timeout=5).returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    _docker_cache.update(t=now, value=info)
+    return info
+
+
 def resolve_backend(settings: SandboxSettings | None = None) -> str:
-    """Какая песочница будет использована на самом деле."""
+    """Какая песочница будет использована на самом деле (docker — только если выбран явно)."""
     wanted = (settings.backend if settings else "auto")
     if wanted == "auto":
         wanted = os.environ.get("DRAGAPI_SANDBOX", "").strip().lower() or "auto"
     if wanted == "process":
         return "process"
+    if wanted == "docker":
+        if docker_info()["available"]:
+            return "docker"
     return "firejail" if firejail_available() else "process"
 
 
@@ -247,7 +278,13 @@ def describe(settings: SandboxSettings | None = None, firewall=None) -> dict:
     isolated = backend == "firejail"
     mode = egress_mode(settings, firewall)
     parts = []
-    if backend == "firejail":
+    dinfo = docker_info() if settings.backend == "docker" else {}
+    if backend == "docker":
+        parts.append("одноразовый контейнер " + ("gVisor" if dinfo.get("gvisor") else "Docker"))
+        parts.append({"off": "без сети", "filtered": "сеть только через firewall проекта",
+                      "open": "сеть без ограничений"}[mode])
+        parts.append("ФС только для чтения, пользователь nobody")
+    elif backend == "firejail":
         parts.append("отдельный процесс в firejail")
         parts.append({"off": "без сети", "filtered": "сеть только через firewall проекта",
                       "open": "сеть без ограничений"}[mode])
@@ -256,14 +293,22 @@ def describe(settings: SandboxSettings | None = None, firewall=None) -> dict:
         parts.append("отдельный процесс только с лимитами — сеть и файлы доступны")
     parts.append("потоки разрешены" if settings.threads else "без потоков и подпроцессов")
     warning = ""
-    if settings.backend == "firejail" and not firejail_available():
+    if settings.backend == "docker" and not dinfo.get("available"):
+        warning = "Docker недоступен — используется " + backend
+    elif backend == "docker" and not dinfo.get("image"):
+        warning = f"образ {DOCKER_IMAGE} не загружен: выполните docker pull {DOCKER_IMAGE}"
+    elif backend == "docker":
+        warning = "медленнее остальных режимов: ~0.5–1 с на вызов"
+    elif settings.backend == "firejail" and not firejail_available():
         warning = "firejail не установлен — используется обычный процесс"
     elif backend == "process":
         warning = "слабая изоляция: установите firejail" + (
             "; правила firewall без firejail не гарантируются" if mode == "filtered" else "")
     elif mode == "open":
         warning = "код блоков может обращаться в сеть без ограничений"
+    isolated = isolated or backend == "docker"
     return {"backend": backend, "requested": settings.backend, "isolated": isolated, "egress": mode,
+            "docker": docker_info(),
             "firejail_available": firejail_available(), "details": ", ".join(parts), "warning": warning}
 
 
@@ -281,6 +326,31 @@ def _hint(error: str, settings: SandboxSettings, backend: str, venv: str | None,
             or "Name or service not known" in error or "Connection refused" in error):
         return " — сеть отключена: включите её в «Настройки проекта → Firewall»"
     return ""
+
+
+def _docker_command(name: str, limits: Limits, settings: SandboxSettings, venv: str | None,
+                    mode: str, proxy_dir: str | None) -> list[str]:
+    mem = int(limits.memory_mb)
+    cpu = max(1, int(limits.timeout + 0.999))
+    pids = 128 if settings.threads else (2 if mode == "filtered" else 1)  # поток-перенаправитель firewall
+    cmd = ["docker", "run", "--rm", "-i", "--name", name, "--pull", "never",
+           "--network", "bridge" if mode == "open" else "none",
+           "--memory", f"{mem}m", "--memory-swap", f"{mem}m", "--cpus", "1", "--pids-limit", str(pids),
+           "--read-only", "--tmpfs", f"/tmp:rw,noexec,nosuid,size={max(settings.max_file_mb, 1)}m",
+           "--user", "65534:65534", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
+           "--ulimit", f"nofile={settings.max_open_files}:{settings.max_open_files}",
+           "--ulimit", f"cpu={cpu}:{cpu}", "--label", "dragapi.sandbox=1",
+           "-e", "LC_ALL=C.UTF-8", "-e", "PYTHONIOENCODING=utf-8", "-e", "OPENBLAS_NUM_THREADS=1",
+           "-e", "OMP_NUM_THREADS=1", "-w", "/tmp"]
+    if docker_info()["gvisor"]:
+        cmd += ["--runtime", "runsc"]
+    if venv:
+        site = next(Path(venv).glob("lib/python*/site-packages"), None)
+        if site:
+            cmd += ["-v", f"{site}:/opt/site:ro"]
+    if proxy_dir:
+        cmd += ["-v", f"{proxy_dir}:{proxy_dir}"]
+    return cmd + [DOCKER_IMAGE, "python", "-I", "-S", "-c", WORKER]
 
 
 def _command(backend: str, limits: Limits, settings: SandboxSettings, venv: str | None,
@@ -344,12 +414,28 @@ async def _run(code, data, env, limits, settings, venv, mode, proxy) -> SandboxR
     nonce = secrets.token_hex(16)
     request = {"code": code, "data": data, "env": env, "nonce": nonce}
     if proxy is not None:
-        request.update(proxy=proxy.path, proxy_setup=PROXY_SETUP, limit_nproc=not settings.threads)
+        # в Docker лимит потоков задаёт --pids-limit; setrlimit там считал бы процессы nobody на всём хосте
+        request.update(proxy=proxy.path, proxy_setup=PROXY_SETUP,
+                       limit_nproc=not settings.threads and backend != "docker")
+    if backend == "docker" and venv:
+        request["site_dir"] = True
     payload = json.dumps(request, ensure_ascii=False, default=str)
     if len(payload) > MAX_INPUT:
         return SandboxResult(False, error="слишком большие входные данные для блока кода", backend=backend)
 
-    cmd, extra = _command(backend, limits, settings, venv, mode, proxy.dir if proxy else None)
+    container = f"dragapi-sbx-{nonce[:12]}"
+    if backend == "docker":
+        if not docker_info()["image"]:
+            return SandboxResult(False, backend=backend,
+                                 error=f"образ {DOCKER_IMAGE} не загружен — выполните: docker pull {DOCKER_IMAGE}")
+        if proxy is not None:  # пользователь nobody в контейнере должен достучаться до сокета прокси
+            os.chmod(proxy.dir, 0o711)
+            os.chmod(proxy.path, 0o666)
+        cmd, extra = _docker_command(container, limits, settings, venv, mode, proxy.dir if proxy else None), {}
+    else:
+        cmd, extra = _command(backend, limits, settings, venv, mode, proxy.dir if proxy else None)
+    # запуск контейнера дольше процесса — даём ему время на старт сверх лимита кода
+    startup = 5.0 if backend == "docker" else 0.5
     loop = asyncio.get_running_loop()
     started = loop.time()
     async with _semaphore():
@@ -359,10 +445,15 @@ async def _run(code, data, env, limits, settings, venv, mode, proxy) -> SandboxR
                 stderr=asyncio.subprocess.PIPE, **extra,
             )
             try:
-                stdout, stderr = await asyncio.wait_for(proc.communicate(payload.encode()), limits.timeout + 0.5)
+                stdout, stderr = await asyncio.wait_for(proc.communicate(payload.encode()), limits.timeout + startup)
             except asyncio.TimeoutError:
                 proc.kill()
                 await proc.wait()
+                if backend == "docker":  # убить сам контейнер: обрыв `docker run` его не останавливает
+                    killer = await asyncio.create_subprocess_exec(
+                        "docker", "rm", "-f", container, stdout=asyncio.subprocess.DEVNULL,
+                        stderr=asyncio.subprocess.DEVNULL)
+                    await killer.wait()
                 hint = (" — сетевые запросы бывают медленными: увеличьте лимит времени блока"
                         if mode != "off" else "")
                 return SandboxResult(False, error=f"превышено время выполнения ({limits.timeout:g} с){hint}",
@@ -379,7 +470,7 @@ async def _run(code, data, env, limits, settings, venv, mode, proxy) -> SandboxR
                                  out.get("stdout", ""), ms, backend)
     # процесс умер, не успев ответить: лимит CPU/памяти или сбой песочницы
     reason = "процесс песочницы завершился без ответа"
-    if proc.returncode in (-9, -24, 137, 152):
+    if proc.returncode in (-9, -24, 137, 152) or "OOMKilled" in stderr.decode("utf-8", "replace"):
         reason = "превышен лимит CPU или памяти"
     tail = stderr.decode("utf-8", "replace").strip()[-300:]
     return SandboxResult(False, error=reason + (f": {tail}" if tail else ""), ms=ms, backend=backend)
