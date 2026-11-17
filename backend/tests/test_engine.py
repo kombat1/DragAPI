@@ -1195,3 +1195,42 @@ def test_docker_backend_describe():
         assert d["backend"] == "docker" and "контейнер" in d["details"]
     else:
         assert d["backend"] != "docker" and "Docker недоступен" in d["warning"]
+
+
+# --- шаг 5: общие блоки (несколько входов) ---
+
+def _shared_404_graph():
+    """«Заказ не найден» — один блок «Ответ» для GET и DELETE /orders/{order_id}."""
+    g = copy.deepcopy(EXAMPLE)
+    g["nodes"] = [n for n in g["nodes"] if n["id"] != "delete-404"]
+    for e in g["edges"]:
+        if e["target"] == "delete-404":
+            e["target"] = "get-404"
+    return g
+
+
+@pytest.mark.parametrize("mode", ["interpreted", "exported"])
+def test_shared_response_block(tmp_path, monkeypatch, mode):
+    g = _shared_404_graph()
+    if mode == "interpreted":
+        client = _interpreted(g, tmp_path)
+    else:
+        client = TestClient(exported_app(g, tmp_path, monkeypatch))
+    assert client.get("/orders/5").json() == {"error": "Заказ 5 не найден"}
+    r = client.delete("/orders/7", headers=KEY)
+    assert r.status_code == 404 and r.json() == {"error": "Заказ 7 не найден"}
+
+
+def test_shared_block_field_scoping():
+    g = _shared_404_graph()
+    node = _node(g, "get-404")
+    node["data"]["body"] = [{"key": "error", "expr": "f'{order} не найден'"}]  # order есть только в GET
+    assert "неизвестные поля order" in _issues(g)
+
+
+def test_cycle_still_detected():
+    g = copy.deepcopy(EXAMPLE)
+    for e in g["edges"]:
+        if e["source"] == "create-logic":
+            e["target"] = "create-check"  # create-check -> create-logic -> create-check
+    assert "цикл" in _issues(g)

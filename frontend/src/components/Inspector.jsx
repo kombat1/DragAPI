@@ -281,7 +281,7 @@ const AUTH_SCHEMES = {
   bearer: 'Bearer-токен (Authorization)',
 }
 
-export default function Inspector({ node, onChange, onDelete, issues, availableFields, models, env, sandbox, firewall, projectId, onOpenSettings, onTestEndpoint, sandboxInfo, readOnly = false }) {
+export default function Inspector({ node, onChange, onDelete, issues, availableFields, models, env, sandbox, firewall, projectId, onOpenSettings, onTestEndpoint, sandboxInfo, readOnly = false, multiCount = 0 }) {
   const [errorLine, setErrorLine] = useState(null)
   const [editorMode, setEditorModeState] = useState(loadEditorMode) // null | 'half' | 'full'
   const setEditorMode = (mode) => {
@@ -289,6 +289,19 @@ export default function Inspector({ node, onChange, onDelete, issues, availableF
     saveEditorMode(mode)
   }
   const catalog = useCatalog()
+  if (!node && multiCount) {
+    return (
+      <div className="inspector empty">
+        <p>
+          Выделено блоков: <b>{multiCount}</b>
+        </p>
+        <p className="muted">
+          <kbd>Ctrl+C</kbd> / <kbd>Ctrl+V</kbd> — копировать и вставить (можно в другой проект), <kbd>Ctrl+D</kbd> — дублировать,{' '}
+          <kbd>Delete</kbd> — удалить. Связи между выделенными блоками копируются вместе с ними.
+        </p>
+      </div>
+    )
+  }
   if (!node) {
     return (
       <div className="inspector empty">
@@ -303,6 +316,10 @@ export default function Inspector({ node, onChange, onDelete, issues, availableF
           разветвляет цепочку — например, «не найдено → 404».
         </p>
         <p className="muted">Несовместимые блоки соединить не получится — канвас подскажет.</p>
+        <p className="muted">
+          <kbd>Shift</kbd> + рамка или <kbd>Ctrl</kbd> + клик — выделить несколько блоков. <kbd>Ctrl+Z</kbd> / <kbd>Ctrl+Shift+Z</kbd> —
+          отменить и повторить. Ветки условия можно сводить в один общий блок (например, «Ответ 404»).
+        </p>
       </div>
     )
   }

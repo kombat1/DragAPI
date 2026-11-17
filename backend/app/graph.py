@@ -435,11 +435,9 @@ def compile_project(graph: dict) -> CompiledProject:
         if (s, handle) in outgoing:
             err(s, "из одного выхода может идти только одна связь")
             continue
-        if t in incoming:
-            err(t, "у блока может быть только один вход")
-            continue
+        # входов может быть несколько: ветки условия (и разные эндпоинты) сходятся в общий блок
         outgoing[(s, handle)] = t
-        incoming[t] = s
+        incoming.setdefault(t, s)
 
     model_map = {m.name: m for m in models}
     env_keys = {e.key for e in env}
@@ -463,7 +461,11 @@ def compile_project(graph: dict) -> CompiledProject:
         routes_seen[key] = nid
         plans.append(plan)
 
-    errors = [i for i in issues if i.level == "error"]
+    errors, seen_errors = [], set()
+    for i in issues:  # общий блок в нескольких ветках может дать одну и ту же ошибку несколько раз
+        if i.level == "error" and (i.node_id, i.message) not in seen_errors:
+            seen_errors.add((i.node_id, i.message))
+            errors.append(i)
     if errors:
         raise GraphError(errors)
 
@@ -506,6 +508,8 @@ class _EndpointCompiler:
         self.declared_path: set[str] = set()
         self.has_json = self.has_form = False
         self.warnings: list[Issue] = []
+        self.shared_steps: dict[str, Step] = {}
+        self.budget = 2000
 
     def fail(self, node_id, msg):
         self.ok = False
@@ -541,15 +545,24 @@ class _EndpointCompiler:
         return EndpointPlan(self.nid, self.method, self.path, str(data.get("summary") or ""), chain,
                             self.path_params, self.inputs, self.auths)
 
-    def _walk(self, cur: str | None, prev: str, known: dict[str, str]) -> Chain | None:
+    def _walk(self, cur: str | None, prev: str, known: dict[str, str],
+              ancestors: frozenset = frozenset()) -> Chain | None:
+        """Обход ветки. Цикл — это возврат к блоку на текущем пути (ancestors); общий блок,
+        в который сходятся разные ветки, компилируется в каждой из них со своими известными полями."""
         steps: list[Step] = []
+        path = set(ancestors) | {self.nid}
         while True:
             if cur is None:
                 self.fail(prev, "цепочка обрывается: она должна заканчиваться блоком «Ответ»")
                 return None
-            if cur in self.visited:
+            if cur in path:
                 self.fail(cur, "цикл в цепочке блоков")
                 return None
+            self.budget -= 1
+            if self.budget < 0:
+                self.fail(self.nid, "граф эндпоинта слишком разветвлён (больше 2000 шагов во всех ветках)")
+                return None
+            path.add(cur)
             self.visited.add(cur)
             self.reached.add(cur)
             node = self.nodes[cur]
@@ -567,16 +580,25 @@ class _EndpointCompiler:
                 if then_id is None or else_id is None:
                     self.fail(cur, "у условия должны быть подключены оба выхода: «да» и «нет»")
                     return None
-                then = self._walk(then_id, cur, dict(known))
-                otherwise = self._walk(else_id, cur, dict(known))
+                then = self._walk(then_id, cur, dict(known), frozenset(path))
+                otherwise = self._walk(else_id, cur, dict(known), frozenset(path))
                 if not cond or then is None or otherwise is None:
                     return None
                 return Chain(steps, Branch(cur, cond[0], then, otherwise))
 
-            step = {
-                "input": self._input, "validate": self._validate, "logic": self._logic,
-                "auth": self._auth, "db": self._db, "code": self._code,
-            }.get(ntype, lambda *a: None)(cur, ndata, known)
+            if ntype in ("input", "auth") and cur in self.shared_steps:
+                # общий блок уже встречался в другой ветке: параметры запроса объявлены один раз
+                step = self.shared_steps[cur]
+                if isinstance(step, InputStep):
+                    for f in step.fields:
+                        known[f.name] = f.type
+            else:
+                step = {
+                    "input": self._input, "validate": self._validate, "logic": self._logic,
+                    "auth": self._auth, "db": self._db, "code": self._code,
+                }.get(ntype, lambda *a: None)(cur, ndata, known)
+                if ntype in ("input", "auth") and step is not None:
+                    self.shared_steps[cur] = step
             if step is not None:
                 steps.append(step)
             prev, cur = cur, self.outgoing.get((cur, None))

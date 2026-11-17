@@ -146,7 +146,21 @@ export default function BlockNode({ id, type, data, selected }) {
       {spec.inputs.length > 0 && (
         <Handle type="target" position={Position.Left} title={`вход: ${spec.inputs.join(' | ')}`} />
       )}
-      <div className="block-head">{spec.title}</div>
+      <div className="block-head">
+        {spec.title}
+        {data.__toggleCollapse && (
+          <button
+            className="collapse-toggle nodrag"
+            title={data.collapsed ? 'Развернуть цепочку' : 'Свернуть цепочку эндпоинта'}
+            onClick={(e) => {
+              e.stopPropagation()
+              data.__toggleCollapse()
+            }}
+          >
+            {data.collapsed ? `▸ ${data.__hiddenCount ?? ''}` : '▾'}
+          </button>
+        )}
+      </div>
       <div className="block-body">
         <Summary type={type} data={data} />
       </div>

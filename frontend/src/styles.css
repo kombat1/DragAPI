@@ -329,3 +329,11 @@ fieldset { border: none; margin: 0; min-width: 0; }
 fieldset.inspector { padding: 12px; }
 fieldset.settings-body { padding: 0; }
 .deploy-status { display: flex; gap: 10px; align-items: center; margin: 8px 0; } .deploy-settings { align-items: flex-start; gap: 12px; } .deploy-settings .field { flex: 0 0 200px; } .deploy-settings .toggle { flex: 1; }
+
+/* --- шаг 5: UX --- */
+.toolbar-group { display: inline-flex; gap: 4px; padding-right: 6px; margin-right: 2px; border-right: 1px solid var(--border); }
+.block-head { display: flex; justify-content: space-between; align-items: center; gap: 6px; }
+.collapse-toggle { background: rgba(255,255,255,.2); color: #fff; border: none; padding: 0 6px; font-size: 11px; border-radius: 4px; line-height: 16px; }
+.collapse-toggle:hover { background: rgba(255,255,255,.35); }
+kbd { font-family: var(--mono); font-size: 11px; padding: 0 4px; border: 1px solid var(--border); border-bottom-width: 2px; border-radius: 4px; background: var(--code-bg); }
+.react-flow__nodesselection-rect, .react-flow__selection { border-color: var(--primary); background: color-mix(in srgb, var(--primary) 8%, transparent); }

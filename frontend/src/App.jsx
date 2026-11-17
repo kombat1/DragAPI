@@ -58,26 +58,101 @@ const withIds = (models) =>
 
 const uid = () => Math.random().toString(36).slice(2, 9)
 
-// Поля, доступные на входе блока: идём по цепочке назад до эндпоинта.
+// Поля, гарантированно доступные на входе блока: пересечение по всем входящим путям
+// (в общий блок могут сходиться ветки с разным набором полей).
+function producedFields(n) {
+  const out = []
+  if (n.type === 'endpoint') for (const m of (n.data.path || '').matchAll(/{(\w+)}/g)) out.push(m[1])
+  if (n.type === 'input') (n.data.fields || []).forEach((f) => f.name && out.push(f.name))
+  if (n.type === 'logic') (n.data.assignments || []).forEach((a) => a.target && out.push(a.target))
+  if (n.type === 'db' && n.data.target) out.push(n.data.target)
+  if (n.type === 'db' && n.data.op === 'list' && n.data.count_target) out.push(n.data.count_target)
+  if (n.type === 'code') (n.data.outputs || []).forEach((o) => o && out.push(o))
+  return out
+}
+
 function fieldsBefore(nodeId, nodes, edges) {
   const byId = Object.fromEntries(nodes.map((n) => [n.id, n]))
-  const chain = []
-  const seen = new Set()
-  let cur = edges.find((e) => e.target === nodeId)?.source
-  while (cur && !seen.has(cur) && byId[cur]) {
-    seen.add(cur)
-    chain.unshift(byId[cur])
-    cur = edges.find((e) => e.target === cur)?.source
+  const memo = new Map()
+  const at = (id, stack) => {
+    if (memo.has(id)) return memo.get(id)
+    const parents = [...new Set(edges.filter((e) => e.target === id).map((e) => e.source))].filter(
+      (p) => byId[p] && !stack.has(p),
+    )
+    let result = null
+    for (const p of parents) {
+      const s = new Set([...at(p, new Set([...stack, p])), ...producedFields(byId[p])])
+      result = result ? new Set([...result].filter((f) => s.has(f))) : s
+    }
+    memo.set(id, result || new Set())
+    return memo.get(id)
   }
-  const out = []
-  for (const n of chain) {
-    if (n.type === 'endpoint') for (const m of (n.data.path || '').matchAll(/{(\w+)}/g)) out.push(m[1])
-    if (n.type === 'input') (n.data.fields || []).forEach((f) => f.name && out.push(f.name))
-    if (n.type === 'logic') (n.data.assignments || []).forEach((a) => a.target && out.push(a.target))
-    if (n.type === 'db' && n.data.target) out.push(n.data.target)
-    if (n.type === 'code') (n.data.outputs || []).forEach((o) => o && out.push(o))
+  return [...at(nodeId, new Set([nodeId]))]
+}
+
+// Только то, что сохраняется: без выделения, размеров и флагов перетаскивания.
+const cleanNode = ({ selected, dragging, measured, resizing, ...n }) => n // eslint-disable-line no-unused-vars
+const cleanEdge = ({ selected, ...e }) => e // eslint-disable-line no-unused-vars
+
+// Автораскладка: каждый эндпоинт — строка слева направо, ветки условий — друг под другом.
+function autoLayout(nodes, edges) {
+  const COL = 290
+  const ROW = 190
+  const byId = Object.fromEntries(nodes.map((n) => [n.id, n]))
+  const out = (id, handle) => edges.find((e) => e.source === id && (handle === undefined || (e.sourceHandle ?? null) === handle))?.target
+  const pos = {}
+  let row = 0
+  const place = (id, depth, r, stack) => {
+    // возвращает, сколько строк заняла ветка
+    if (!id || !byId[id] || stack.has(id)) return 1
+    if (pos[id]) return 1 // общий блок уже размещён
+    pos[id] = { x: 40 + depth * COL, y: 40 + r * ROW }
+    const next = new Set([...stack, id])
+    if (byId[id].type === 'condition') {
+      const a = place(out(id, 'true'), depth + 1, r, next)
+      const b = place(out(id, 'false'), depth + 1, r + a, next)
+      return a + b
+    }
+    return place(out(id, null) ?? out(id), depth + 1, r, next)
   }
-  return [...new Set(out)]
+  const endpoints = nodes.filter((n) => n.type === 'endpoint').sort((a, b) => a.position.y - b.position.y || a.position.x - b.position.x)
+  for (const ep of endpoints) row += place(ep.id, 0, row, new Set())
+  let x = 0
+  for (const n of nodes) {
+    if (!pos[n.id]) {
+      pos[n.id] = { x: 40 + x * COL, y: 40 + row * ROW + 40 }
+      x++
+    }
+  }
+  return nodes.map((n) => ({ ...n, position: pos[n.id] }))
+}
+
+// Блоки, скрытые свёрнутыми эндпоинтами (если блок нужен и развёрнутому эндпоинту — он виден).
+function hiddenByCollapse(nodes, edges) {
+  const reach = (start) => {
+    const seen = new Set()
+    const queue = [start]
+    while (queue.length) {
+      const id = queue.shift()
+      if (seen.has(id)) continue
+      seen.add(id)
+      edges.filter((e) => e.source === id).forEach((e) => queue.push(e.target))
+    }
+    seen.delete(start)
+    return seen
+  }
+  const visible = new Set()
+  const hidden = new Set()
+  const counts = {}
+  for (const ep of nodes.filter((n) => n.type === 'endpoint')) {
+    const r = reach(ep.id)
+    if (ep.data.collapsed) {
+      counts[ep.id] = r.size
+      r.forEach((id) => hidden.add(id))
+    } else r.forEach((id) => visible.add(id))
+  }
+  visible.forEach((id) => hidden.delete(id))
+  return { hidden, counts }
 }
 
 function Palette({ catalog }) {
@@ -135,7 +210,11 @@ function Editor({ catalog, projectId, onProjectsChanged, me }) {
     const t = setTimeout(() => api.sandboxDescribe(sandbox, firewall).then(setSandboxInfo).catch(() => {}), 200)
     return () => clearTimeout(t)
   }, [sandbox, firewall])
-  const [selectedId, setSelectedId] = useState(null)
+  // выделение хранит сам React Flow (n.selected): Shift — рамка, Ctrl/⌘ — добавить к выделению
+  const setSelectedId = useCallback(
+    (id) => setNodes((ns) => ns.map((n) => ((n.selected ?? false) === (n.id === id) ? n : { ...n, selected: n.id === id }))),
+    [],
+  )
   const [validation, setValidation] = useState({ ok: true, issues: [], routes: [] })
   const [dirty, setDirty] = useState(false)
   const [running, setRunning] = useState(null) // {base_url, docs_url, routes}
@@ -181,9 +260,12 @@ function Editor({ catalog, projectId, onProjectsChanged, me }) {
   }, [projectId, fitView])
 
   const lastRoutes = useRef([])
+  // ключ без выделения/размеров: выделение блока не должно перепроверять граф и помечать проект изменённым
+  const nodesKey = JSON.stringify(nodes.map(cleanNode))
+  const edgesKey = JSON.stringify(edges.map(cleanEdge))
   const graph = useMemo(
-    () => ({ name, nodes, edges, models, env, sandbox, libraries, firewall, tests }),
-    [name, nodes, edges, models, env, sandbox, libraries, firewall, tests],
+    () => ({ name, nodes: JSON.parse(nodesKey), edges: JSON.parse(edgesKey), models, env, sandbox, libraries, firewall, tests }),
+    [name, nodesKey, edgesKey, models, env, sandbox, libraries, firewall, tests],
   )
 
   // живая проверка графа на бэкенде
@@ -257,7 +339,8 @@ function Editor({ catalog, projectId, onProjectsChanged, me }) {
 
   const onNodesChange = useCallback((changes) => {
     setNodes((ns) => applyNodeChanges(changes, ns))
-    if (changes.some((c) => c.type !== 'select' && c.type !== 'dimensions')) setDirty(true)
+    if (changes.some((c) => c.type !== 'select' && c.type !== 'dimensions' && !(c.type === 'position' && !c.dragging && !c.position)))
+      setDirty(true)
   }, [])
   const onEdgesChange = useCallback((changes) => {
     setEdges((es) => applyEdgeChanges(changes, es))
@@ -269,9 +352,10 @@ function Editor({ catalog, projectId, onProjectsChanged, me }) {
       const src = nodes.find((n) => n.id === c.source)
       const dst = nodes.find((n) => n.id === c.target)
       if (!src || !dst || src.id === dst.id) return false
-      // из одного выхода — одна связь (у «Условия» два выхода: true/false), в один вход — одна связь
+      // из одного выхода — одна связь (у «Условия» два выхода: true/false);
+      // входов может быть несколько — ветки сходятся в общий блок
       const sameOutput = (e) => e.source === c.source && (e.sourceHandle ?? null) === (c.sourceHandle ?? null)
-      if (edges.some((e) => sameOutput(e) || e.target === c.target)) return false
+      if (edges.some(sameOutput)) return false
       return canConnect(catalog, src.type, dst.type)
     },
     [nodes, edges, catalog],
@@ -287,7 +371,7 @@ function Editor({ catalog, projectId, onProjectsChanged, me }) {
       if (state.isValid === false && state.toNode) {
         const from = catalog.blocks[state.fromNode?.type]?.title
         const to = catalog.blocks[state.toNode.type]?.title
-        notify(`«${from}» нельзя подключить к «${to}»: типы данных несовместимы или вход/выход уже занят`, 'error')
+        notify(`«${from}» нельзя подключить к «${to}»: типы данных несовместимы или этот выход уже занят`, 'error')
       }
     },
     [catalog, notify],
@@ -312,6 +396,133 @@ function Editor({ catalog, projectId, onProjectsChanged, me }) {
     setNodes((ns) => ns.map((n) => (n.id === id ? { ...n, data } : n)))
     markDirty()
   }
+
+  // ---------- история (Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y) ----------
+  const history = useRef({ past: [], future: [], last: null, restoring: false })
+  const snapshot = () => JSON.stringify({ nodes: nodes.map(cleanNode), edges: edges.map(cleanEdge) })
+  useEffect(() => {
+    history.current = { past: [], future: [], last: null, restoring: false }
+  }, [projectId])
+  useEffect(() => {
+    if (!loaded) return
+    const h = history.current
+    const snap = JSON.stringify({ nodes: JSON.parse(nodesKey), edges: JSON.parse(edgesKey) })
+    if (h.last === null || h.restoring) {
+      h.last = snap
+      h.restoring = false
+      return
+    }
+    if (snap === h.last || nodes.some((n) => n.dragging)) return
+    // быстрые правки (набор текста) объединяются в один шаг
+    const t = setTimeout(() => {
+      h.past.push(h.last)
+      if (h.past.length > 100) h.past.shift()
+      h.future = []
+      h.last = snap
+      setHistoryTick((x) => x + 1)
+    }, 400)
+    return () => clearTimeout(t)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [nodesKey, edgesKey, loaded])
+  const [, setHistoryTick] = useState(0)
+
+  const restore = (snap) => {
+    const { nodes: ns, edges: es } = JSON.parse(snap)
+    history.current.restoring = true
+    setNodes(ns)
+    setEdges(es)
+    setDirty(true)
+    setHistoryTick((x) => x + 1)
+  }
+  const undo = () => {
+    const h = history.current
+    const cur = snapshot()
+    if (cur !== h.last && h.last !== null) {
+      h.past.push(h.last) // ещё не записанная правка
+      h.last = cur
+    }
+    if (!h.past.length) return
+    h.future.push(h.last)
+    const prev = h.past.pop()
+    h.last = prev
+    restore(prev)
+  }
+  const redo = () => {
+    const h = history.current
+    if (!h.future.length) return
+    h.past.push(h.last)
+    const next = h.future.pop()
+    h.last = next
+    restore(next)
+  }
+
+  // ---------- копирование / вставка / дублирование ----------
+  const pasteCount = useRef(0)
+  const copySelection = () => {
+    const sel = nodes.filter((n) => n.selected).map(cleanNode)
+    if (!sel.length) return false
+    const ids = new Set(sel.map((n) => n.id))
+    const clip = { nodes: sel, edges: edges.filter((e) => ids.has(e.source) && ids.has(e.target)).map(cleanEdge) }
+    try {
+      localStorage.setItem('dragapi.clipboard', JSON.stringify(clip)) // работает и между проектами
+    } catch {
+      /* без хранилища — только в пределах вкладки */
+    }
+    window.__dragapiClipboard = clip
+    pasteCount.current = 0
+    return true
+  }
+  const paste = () => {
+    let clip = window.__dragapiClipboard
+    try {
+      clip = JSON.parse(localStorage.getItem('dragapi.clipboard')) || clip
+    } catch {
+      /* берём из памяти вкладки */
+    }
+    if (!clip?.nodes?.length) return
+    pasteCount.current += 1
+    const shift = 40 * pasteCount.current
+    const map = Object.fromEntries(clip.nodes.map((n) => [n.id, `${n.type}-${uid()}`]))
+    const newNodes = clip.nodes.map((n) => ({
+      ...structuredClone(n),
+      id: map[n.id],
+      position: { x: n.position.x + shift, y: n.position.y + shift },
+      selected: true,
+    }))
+    const newEdges = clip.edges.map((e) => ({ ...e, id: `e-${uid()}`, source: map[e.source], target: map[e.target] }))
+    setNodes((ns) => [...ns.map((n) => (n.selected ? { ...n, selected: false } : n)), ...newNodes])
+    setEdges((es) => [...es, ...newEdges])
+    markDirty()
+    notify(`Вставлено блоков: ${newNodes.length}`)
+  }
+
+  useEffect(() => {
+    const h = (e) => {
+      const el = document.activeElement
+      const typing = ['INPUT', 'TEXTAREA', 'SELECT'].includes(el?.tagName) || el?.isContentEditable
+      if (typing || readOnly || !(e.ctrlKey || e.metaKey)) return
+      const k = e.key.toLowerCase()
+      if (k === 'z' && !e.shiftKey) (e.preventDefault(), undo())
+      else if ((k === 'z' && e.shiftKey) || k === 'y') (e.preventDefault(), redo())
+      else if (k === 'c') copySelection()
+      else if (k === 'v') (e.preventDefault(), paste())
+      else if (k === 'd') (e.preventDefault(), copySelection() && paste())
+    }
+    window.addEventListener('keydown', h)
+    return () => window.removeEventListener('keydown', h)
+  })
+
+  const arrange = () => {
+    setNodes((ns) => autoLayout(ns, edges))
+    markDirty()
+    setTimeout(() => fitView({ padding: 0.15, maxZoom: 1, duration: 300 }), 50)
+  }
+
+  const collapse = useMemo(() => hiddenByCollapse(nodes, edges), [nodesKey, edgesKey]) // eslint-disable-line react-hooks/exhaustive-deps
+  const toggleCollapse = useCallback((id) => {
+    setNodes((ns) => ns.map((n) => (n.id === id ? { ...n, data: { ...n.data, collapsed: !n.data.collapsed } } : n)))
+    setDirty(true)
+  }, [])
 
   const deleteNode = (id) => {
     setNodes((ns) => ns.filter((n) => n.id !== id))
@@ -344,15 +555,17 @@ function Editor({ catalog, projectId, onProjectsChanged, me }) {
     () =>
       nodes.map((n) => ({
         ...n,
-        selected: n.id === selectedId,
+        hidden: collapse.hidden.has(n.id),
         data: {
           ...n.data,
           __issues: issuesByNode[n.id],
           __active: activeNodes.includes(n.id) || debugVisited.has(n.id),
           __step: debugStep && debugStep.node_id === n.id ? debugStep : null,
+          __hiddenCount: collapse.counts[n.id],
+          __toggleCollapse: n.type === 'endpoint' ? () => toggleCollapse(n.id) : undefined,
         },
       })),
-    [nodes, selectedId, issuesByNode, activeNodes, debugVisited, debugStep],
+    [nodes, issuesByNode, activeNodes, debugVisited, debugStep, collapse, toggleCollapse],
   )
 
   // подписи «да»/«нет» на связях из условия
@@ -378,7 +591,8 @@ function Editor({ catalog, projectId, onProjectsChanged, me }) {
     [catalog],
   )
 
-  const selected = nodes.find((n) => n.id === selectedId)
+  const selectedNodes = nodes.filter((n) => n.selected)
+  const selected = selectedNodes.length === 1 ? selectedNodes[0] : null
   const errors = (validation.issues || []).filter((i) => i.level === 'error').length
 
   return (
@@ -398,6 +612,19 @@ function Editor({ catalog, projectId, onProjectsChanged, me }) {
           {errors ? `Ошибок: ${errors}` : `Граф корректен · маршрутов: ${validation.routes?.length ?? 0}`}
         </span>
         <div className="spacer" />
+        {!readOnly && (
+          <span className="toolbar-group">
+            <button className="small" onClick={undo} disabled={!history.current.past.length && snapshot() === history.current.last} title="Отменить (Ctrl+Z)">
+              ↶
+            </button>
+            <button className="small" onClick={redo} disabled={!history.current.future.length} title="Повторить (Ctrl+Shift+Z)">
+              ↷
+            </button>
+            <button className="small" onClick={arrange} title="Расставить блоки: эндпоинт — строка, ветки — друг под другом">
+              ⊞ Упорядочить
+            </button>
+          </span>
+        )}
         <button
           onClick={() => setSettingsOpen('models')}
           title="Модели данных, переменные окружения, песочница и библиотеки"
@@ -446,9 +673,8 @@ function Editor({ catalog, projectId, onProjectsChanged, me }) {
             onConnect={onConnect}
             onConnectEnd={onConnectEnd}
             isValidConnection={isValidConnection}
-            onNodeClick={(_, n) => setSelectedId(n.id)}
-            onPaneClick={() => setSelectedId(null)}
-            onNodesDelete={() => setSelectedId(null)}
+            selectionOnDrag={false}
+            multiSelectionKeyCode={['Control', 'Meta']}
             deleteKeyCode={readOnly ? null : ['Delete', 'Backspace']}
             nodesDraggable={!readOnly}
             nodesConnectable={!readOnly}
@@ -464,6 +690,7 @@ function Editor({ catalog, projectId, onProjectsChanged, me }) {
         </div>
         <Inspector
           readOnly={readOnly}
+          multiCount={selectedNodes.length > 1 ? selectedNodes.length : 0}
           node={selected}
           issues={selected ? issuesByNode[selected.id] || [] : []}
           availableFields={selected ? fieldsBefore(selected.id, nodes, edges) : []}
