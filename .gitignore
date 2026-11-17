@@ -5,10 +5,6 @@ frontend/dist/
 __pycache__/
 .pytest_cache/
 
-# рабочие данные платформы: проекты пользователя, базы превью, окружения, сокеты
-backend/data/projects/*
-!backend/data/projects/example-shop.json
-backend/data/db/
-backend/data/envs/
-backend/data/fw/
-backend/data/secret.key
+# рабочие данные платформы: проекты, история, базы превью, окружения, сокеты, ключ шифрования
+# (примеры для первого запуска — в backend/examples/)
+backend/data/

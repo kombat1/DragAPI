@@ -71,6 +71,10 @@ function EnvTab({ env, setEnv }) {
         в блоке кода. Значения секретов используются только в превью: в экспортированный код они не попадают — там их
         нужно задать через окружение (см. <code>.env.example</code>).
       </p>
+      <p className="hint">
+        🔒 Значения секретов хранятся зашифрованными ключом платформы и после сохранения не показываются — ни здесь,
+        ни в истории версий. Оставьте поле пустым, чтобы не менять значение.
+      </p>
       <ListEditor
         items={env}
         onChange={setEnv}
@@ -79,7 +83,14 @@ function EnvTab({ env, setEnv }) {
         newItem={() => ({ key: '', value: '', secret: false })}
         columns={[
           { key: 'key', label: 'KEY', mono: true, flex: 1.3 },
-          { key: 'value', label: 'значение', mono: true, flex: 2, password: (it) => it.secret },
+          {
+            key: 'value',
+            label: 'значение',
+            mono: true,
+            flex: 2,
+            password: (it) => it.secret,
+            placeholder: (it) => (it.secret && it.has_value ? '•••••• задано — введите новое, чтобы заменить' : ''),
+          },
           { key: 'secret', label: 'секрет', checkbox: true },
         ]}
       />

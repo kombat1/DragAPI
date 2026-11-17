@@ -1,5 +1,45 @@
 {
+  "id": "example-shop",
   "name": "Пример: магазин",
+  "models": [
+    {
+      "name": "orders",
+      "fields": [
+        {
+          "name": "item",
+          "type": "str"
+        },
+        {
+          "name": "price",
+          "type": "float"
+        },
+        {
+          "name": "qty",
+          "type": "int"
+        },
+        {
+          "name": "total",
+          "type": "float"
+        },
+        {
+          "name": "status",
+          "type": "str"
+        }
+      ]
+    }
+  ],
+  "env": [
+    {
+      "key": "SHOP_NAME",
+      "value": "DragAPI Shop",
+      "secret": false
+    },
+    {
+      "key": "API_KEY",
+      "value": "dev-secret",
+      "secret": true
+    }
+  ],
   "nodes": [
     {
       "id": "hello",
@@ -12,10 +52,6 @@
         "method": "GET",
         "path": "/hello",
         "summary": "Приветствие"
-      },
-      "measured": {
-        "width": 230,
-        "height": 57
       }
     },
     {
@@ -35,10 +71,6 @@
             "default": "world"
           }
         ]
-      },
-      "measured": {
-        "width": 230,
-        "height": 74
       }
     },
     {
@@ -55,10 +87,6 @@
             "expr": "f'Hello, {name}! Это {env[\"SHOP_NAME\"]}'"
           }
         ]
-      },
-      "measured": {
-        "width": 230,
-        "height": 57
       }
     },
     {
@@ -76,10 +104,6 @@
             "expr": "greeting"
           }
         ]
-      },
-      "measured": {
-        "width": 230,
-        "height": 74
       }
     },
     {
@@ -93,10 +117,6 @@
         "method": "POST",
         "path": "/orders",
         "summary": "Создать заказ"
-      },
-      "measured": {
-        "width": 230,
-        "height": 57
       }
     },
     {
@@ -126,10 +146,6 @@
             "default": 1
           }
         ]
-      },
-      "measured": {
-        "width": 230,
-        "height": 110
       }
     },
     {
@@ -158,10 +174,6 @@
             "value": "2"
           }
         ]
-      },
-      "measured": {
-        "width": 230,
-        "height": 93
       }
     },
     {
@@ -178,10 +190,6 @@
             "expr": "round(price * qty, 2)"
           }
         ]
-      },
-      "measured": {
-        "width": 230,
-        "height": 57
       }
     },
     {
@@ -217,10 +225,6 @@
             "expr": "'new'"
           }
         ]
-      },
-      "measured": {
-        "width": 230,
-        "height": 164
       }
     },
     {
@@ -238,10 +242,6 @@
             "expr": "order"
           }
         ]
-      },
-      "measured": {
-        "width": 230,
-        "height": 74
       }
     },
     {
@@ -255,10 +255,6 @@
         "method": "GET",
         "path": "/orders",
         "summary": "Список заказов"
-      },
-      "measured": {
-        "width": 230,
-        "height": 57
       }
     },
     {
@@ -278,10 +274,6 @@
             "default": 50
           }
         ]
-      },
-      "measured": {
-        "width": 230,
-        "height": 74
       }
     },
     {
@@ -299,10 +291,6 @@
         "limit": "100",
         "order_by": "id",
         "descending": true
-      },
-      "measured": {
-        "width": 230,
-        "height": 75
       }
     },
     {
@@ -324,10 +312,6 @@
             "expr": "orders[:limit]"
           }
         ]
-      },
-      "measured": {
-        "width": 230,
-        "height": 92
       }
     },
     {
@@ -341,10 +325,6 @@
         "method": "GET",
         "path": "/orders/{order_id}",
         "summary": "Заказ по id"
-      },
-      "measured": {
-        "width": 230,
-        "height": 57
       }
     },
     {
@@ -363,10 +343,6 @@
             "required": true
           }
         ]
-      },
-      "measured": {
-        "width": 230,
-        "height": 74
       }
     },
     {
@@ -381,10 +357,6 @@
         "op": "get",
         "target": "order",
         "id_expr": "order_id"
-      },
-      "measured": {
-        "width": 230,
-        "height": 75
       }
     },
     {
@@ -396,10 +368,6 @@
       },
       "data": {
         "expr": "order is None"
-      },
-      "measured": {
-        "width": 230,
-        "height": 84
       }
     },
     {
@@ -417,10 +385,6 @@
             "expr": "f'Заказ {order_id} не найден'"
           }
         ]
-      },
-      "measured": {
-        "width": 230,
-        "height": 74
       }
     },
     {
@@ -438,10 +402,6 @@
             "expr": "order"
           }
         ]
-      },
-      "measured": {
-        "width": 230,
-        "height": 74
       }
     },
     {
@@ -455,10 +415,6 @@
         "method": "DELETE",
         "path": "/orders/{order_id}",
         "summary": "Удалить заказ (нужен X-API-Key)"
-      },
-      "measured": {
-        "width": 230,
-        "height": 57
       }
     },
     {
@@ -472,12 +428,7 @@
         "scheme": "api_key_header",
         "name": "X-API-Key",
         "secret_env": "API_KEY"
-      },
-      "measured": {
-        "width": 230,
-        "height": 75
-      },
-      "selected": false
+      }
     },
     {
       "id": "delete-in",
@@ -495,10 +446,6 @@
             "required": true
           }
         ]
-      },
-      "measured": {
-        "width": 230,
-        "height": 74
       }
     },
     {
@@ -513,10 +460,6 @@
         "op": "delete",
         "target": "deleted",
         "id_expr": "order_id"
-      },
-      "measured": {
-        "width": 230,
-        "height": 75
       }
     },
     {
@@ -528,10 +471,6 @@
       },
       "data": {
         "expr": "deleted"
-      },
-      "measured": {
-        "width": 230,
-        "height": 84
       }
     },
     {
@@ -549,10 +488,6 @@
             "expr": "order_id"
           }
         ]
-      },
-      "measured": {
-        "width": 230,
-        "height": 74
       }
     },
     {
@@ -570,10 +505,6 @@
             "expr": "f'Заказ {order_id} не найден'"
           }
         ]
-      },
-      "measured": {
-        "width": 230,
-        "height": 74
       }
     },
     {
@@ -587,10 +518,6 @@
         "method": "POST",
         "path": "/text/stats",
         "summary": "Статистика текста (Python-код)"
-      },
-      "measured": {
-        "width": 230,
-        "height": 57
       }
     },
     {
@@ -621,10 +548,6 @@
             "default": 3
           }
         ]
-      },
-      "measured": {
-        "width": 230,
-        "height": 110
       }
     },
     {
@@ -652,10 +575,6 @@
             "value": "20"
           }
         ]
-      },
-      "measured": {
-        "width": 230,
-        "height": 93
       }
     },
     {
@@ -673,10 +592,6 @@
         ],
         "timeout": 2,
         "memory_mb": 128
-      },
-      "measured": {
-        "width": 230,
-        "height": 128
       }
     },
     {
@@ -698,10 +613,6 @@
             "expr": "top_words"
           }
         ]
-      },
-      "measured": {
-        "width": 230,
-        "height": 92
       }
     },
     {
@@ -715,10 +626,6 @@
         "method": "POST",
         "path": "/upload",
         "summary": "Загрузка файла"
-      },
-      "measured": {
-        "width": 230,
-        "height": 57
       }
     },
     {
@@ -743,12 +650,7 @@
             "default": ""
           }
         ]
-      },
-      "measured": {
-        "width": 230,
-        "height": 92
-      },
-      "selected": true
+      }
     },
     {
       "id": "upload-out",
@@ -773,10 +675,6 @@
             "expr": "comment"
           }
         ]
-      },
-      "measured": {
-        "width": 230,
-        "height": 110
       }
     }
   ],
@@ -926,51 +824,5 @@
       "target": "upload-out"
     }
   ],
-  "models": [
-    {
-      "name": "orders",
-      "fields": [
-        {
-          "name": "item",
-          "type": "str"
-        },
-        {
-          "name": "price",
-          "type": "float"
-        },
-        {
-          "name": "qty",
-          "type": "int"
-        },
-        {
-          "name": "total",
-          "type": "float"
-        },
-        {
-          "name": "status",
-          "type": "str"
-        }
-      ]
-    }
-  ],
-  "env": [
-    {
-      "key": "SHOP_NAME",
-      "value": "DragAPI Shop",
-      "secret": false
-    },
-    {
-      "key": "API_KEY",
-      "value": "dev-secret",
-      "secret": true
-    }
-  ],
-  "sandbox": {},
-  "libraries": {
-    "packages": [],
-    "only_binary": true
-  },
-  "viewport": null,
-  "id": "example-shop",
-  "updated": 1794923995.6928477
+  "updated": 0
 }

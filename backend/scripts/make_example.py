@@ -6,7 +6,7 @@
 import json
 from pathlib import Path
 
-OUT = Path(__file__).resolve().parent.parent / "data" / "projects" / "example-shop.json"
+OUT = Path(__file__).resolve().parent.parent / "examples" / "example-shop.json"
 ROW = 250
 COL = 290
 

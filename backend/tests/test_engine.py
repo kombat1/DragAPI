@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from app import codegen, expr, sandbox, storage
+from app import codegen, expr, sandbox, storage, vault
 from app.pyenv import EnvManager, validate_packages
 from app.sandbox import SandboxSettings
 from app.firewall import EgressPolicy, FirewallSettings, parse_rule
@@ -16,7 +16,7 @@ from app.interpreter import build_app
 from app.main import app as platform_app
 from app.runtime import Database
 
-EXAMPLE = json.loads((Path(__file__).parent.parent / "data/projects/example-shop.json").read_text("utf-8"))
+EXAMPLE = json.loads((Path(__file__).parent.parent / "examples/example-shop.json").read_text("utf-8"))
 KEY = {"X-API-Key": "dev-secret"}
 
 
@@ -725,3 +725,75 @@ def test_exported_tests_run_with_pytest(tmp_path):
     assert proc.returncode == 0, proc.stdout[-2000:] + proc.stderr[-2000:]
     assert "4 passed" in proc.stdout
     assert "dev-secret" not in (root / "tests" / "test_api.py").read_text()
+
+
+# --- шаг 2: шифрование секретов ---
+
+def test_secrets_encrypted_at_rest(tmp_path, monkeypatch):
+    c, pid = _platform(tmp_path, monkeypatch)
+    body = _graph_body()
+    assert c.put(f"/api/projects/{pid}", json=body).status_code == 200
+    raw = (tmp_path / "projects" / f"{pid}.json").read_text()
+    assert "dev-secret" not in raw and "value_enc" in raw
+
+    # браузер не получает значение секрета
+    env = {e["key"]: e for e in c.get(f"/api/projects/{pid}").json()["env"]}
+    assert env["API_KEY"]["value"] == "" and env["API_KEY"]["has_value"] is True
+    assert "value_enc" not in env["API_KEY"] and env["SHOP_NAME"]["value"] == "DragAPI Shop"
+
+    # сохраняем из браузера (секрет пустой) — значение сохраняется, в истории тоже только шифр
+    masked = c.get(f"/api/projects/{pid}").json()
+    body2 = {**body, "env": masked["env"], "name": "T2"}
+    c.put(f"/api/projects/{pid}", json=body2)
+    for f in (tmp_path / "projects").rglob("*.json"):
+        assert "dev-secret" not in f.read_text(), f
+
+    # превью и тестовый запрос используют расшифрованный секрет
+    c.post(f"/api/projects/{pid}/run")
+    c.post(f"/run/{pid}/orders", json={"item": "pen", "price": 1})
+    assert c.delete(f"/run/{pid}/orders/1", headers={"X-API-Key": "dev-secret"}).status_code == 200
+    r = c.post(f"/api/projects/{pid}/test-request", json={
+        "graph": body2, "endpoint": "hello", "request": {}}).json()
+    assert r["status"] == 200
+    r = c.post(f"/api/projects/{pid}/test-request", json={
+        "graph": body2, "endpoint": "delete",
+        "request": {"path": {"order_id": "5"}, "headers": {"X-API-Key": "{{env.API_KEY}}"}}}).json()
+    assert r["status"] == 404  # ключ подошёл (иначе 401), заказа 5 нет
+    # «Проверить» блока кода тоже получает секрет
+    code = "def run(data, env):\n    return {'k': env['API_KEY']}"
+    r = c.post(f"/api/projects/{pid}/sandbox/run", json={"code": code, "env": {"API_KEY": ""}}).json()
+    assert r["ok"] and r["result"] == {"k": "dev-secret"}
+
+    # смена значения
+    body3 = {**body2, "env": [e | ({"value": "new-key"} if e["key"] == "API_KEY" else {}) for e in masked["env"]]}
+    c.put(f"/api/projects/{pid}", json=body3)
+    c.post(f"/api/projects/{pid}/run")
+    assert c.delete(f"/run/{pid}/orders/1", headers={"X-API-Key": "dev-secret"}).status_code == 401
+
+
+def test_secret_migration_and_wrong_key(tmp_path, monkeypatch):
+    from cryptography.fernet import Fernet
+
+    monkeypatch.setattr(storage, "DATA_DIR", tmp_path)
+    plain = {"name": "old", "nodes": [], "edges": [],
+             "env": [{"key": "TOKEN", "value": "s3cr3t", "secret": True}, {"key": "A", "value": "1"}]}
+    (tmp_path / "old-1.json").write_text(json.dumps(plain))
+    (tmp_path / "old-1.versions").mkdir()
+    (tmp_path / "old-1.versions" / "1.json").write_text(json.dumps(plain))
+    assert storage.migrate_secrets() == 2
+    assert all("s3cr3t" not in f.read_text() for f in tmp_path.rglob("*.json"))
+    assert storage.migrate_secrets() == 0
+    env = vault.unseal_env(storage.load("old-1")["env"])
+    assert {e["key"]: e["value"] for e in env} == {"TOKEN": "s3cr3t", "A": "1"}
+
+    monkeypatch.setenv("DRAGAPI_SECRET_KEY", Fernet.generate_key().decode())
+    vault.reset_cache()
+    with pytest.raises(vault.VaultError, match="другим ключом"):
+        vault.unseal_env(storage.load("old-1")["env"])
+
+
+def test_seed_examples(tmp_path, monkeypatch):
+    monkeypatch.setattr(storage, "DATA_DIR", tmp_path / "p")
+    assert storage.seed_examples() == 1
+    assert storage.seed_examples() == 0  # уже есть проекты — не трогаем
+    assert "dev-secret" not in (tmp_path / "p" / "example-shop.json").read_text()

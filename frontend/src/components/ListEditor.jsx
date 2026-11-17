@@ -38,7 +38,7 @@ export default function ListEditor({ items, onChange, columns, empty, newItem, a
                   type={col.password?.(item) ? 'password' : 'text'}
                   autoComplete="off"
                   value={item[col.key] ?? ''}
-                  placeholder={col.label}
+                  placeholder={col.placeholder?.(item) || col.label}
                   className={col.mono ? 'mono' : ''}
                   disabled={col.disabled?.(item)}
                   onChange={(e) => update(i, col.key, e.target.value)}

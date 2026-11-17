@@ -1,4 +1,7 @@
-"""Хранилище проектов: JSON-файлы в data/projects. История версий — в data/projects/<id>.versions/."""
+"""Хранилище проектов: JSON-файлы в data/projects. История версий — в data/projects/<id>.versions/.
+
+Значения секретных переменных окружения на диске только зашифрованы (см. vault.py).
+"""
 
 from __future__ import annotations
 
@@ -9,8 +12,11 @@ import time
 import uuid
 from pathlib import Path
 
+from . import vault
+
 DATA_DIR = Path(__file__).resolve().parent.parent / "data" / "projects"
 DB_DIR = Path(__file__).resolve().parent.parent / "data" / "db"
+EXAMPLES_DIR = Path(__file__).resolve().parent.parent / "examples"
 ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 MAX_VERSIONS = 30
 
@@ -47,6 +53,13 @@ def load(pid: str) -> dict:
 def save(pid: str, project: dict) -> dict:
     path = _path(pid)
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    previous_env = []
+    if path.exists():
+        try:
+            previous_env = json.loads(path.read_text("utf-8")).get("env") or []
+        except (OSError, json.JSONDecodeError):
+            pass
+    project = {**project, "env": vault.seal_env(project.get("env"), previous_env)}
     if path.exists():  # предыдущую версию — в историю
         vdir = DATA_DIR / f"{pid}.versions"
         vdir.mkdir(exist_ok=True)
@@ -99,3 +112,35 @@ def load_version(pid: str, version: str) -> dict:
     if not p.exists():
         raise NotFound(version)
     return json.loads(p.read_text("utf-8"))
+
+
+def migrate_secrets() -> int:
+    """Зашифровать секреты, сохранённые открытым текстом (проекты и их история версий)."""
+    if not DATA_DIR.exists():
+        return 0
+    changed = 0
+    for path in list(DATA_DIR.glob("*.json")) + list(DATA_DIR.glob("*.versions/*.json")):
+        try:
+            data = json.loads(path.read_text("utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if vault.needs_sealing(data.get("env")):
+            data["env"] = vault.seal_env(data["env"])
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), "utf-8")
+            tmp.replace(path)
+            changed += 1
+    return changed
+
+
+def seed_examples() -> int:
+    """При первом запуске (проектов ещё нет) — скопировать примеры из backend/examples."""
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    if any(DATA_DIR.glob("*.json")) or not EXAMPLES_DIR.exists():
+        return 0
+    count = 0
+    for src in EXAMPLES_DIR.glob("*.json"):
+        project = json.loads(src.read_text("utf-8"))
+        save(src.stem, project)
+        count += 1
+    return count

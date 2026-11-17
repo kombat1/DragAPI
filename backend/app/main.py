@@ -9,6 +9,7 @@ from __future__ import annotations
 import io
 import zipfile
 from collections import deque
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import time
@@ -21,7 +22,7 @@ from pydantic import BaseModel
 from starlette.responses import JSONResponse
 from starlette.routing import Mount, Router
 
-from . import codegen, sandbox, storage, testing
+from . import codegen, sandbox, storage, testing, vault
 from .pyenv import envs, validate_packages
 from .blocks import catalog
 from .graph import CompiledProject, GraphError, compile_project
@@ -29,7 +30,16 @@ from .interpreter import build_app
 from .firewall import FirewallSettings
 from .runtime import Database, IngressFirewall
 
-app = FastAPI(title="DragAPI", version="0.2.0")
+@asynccontextmanager
+async def lifespan(_app):
+    storage.seed_examples()
+    migrated = storage.migrate_secrets()
+    if migrated:
+        print(f"DragAPI: зашифрованы секреты в {migrated} файл(ах) проектов и истории")
+    yield
+
+
+app = FastAPI(title="DragAPI", version="0.3.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 
@@ -256,7 +266,12 @@ async def sandbox_run(pid: str, body: SandboxRunIn):
         raise HTTPException(400, "код слишком длинный")
     limits = sandbox.Limits(min(max(body.timeout, 0.1), 10), min(max(body.memory_mb, 32), 1024))
     settings = _settings(body.sandbox)
-    result = await sandbox.run_code(body.code, body.data, body.env, limits, settings, envs.venv(pid),
+    env = dict(body.env)
+    stored = _with_secrets(pid, {"env": _load(pid).get("env") or []})["env"]
+    for e in stored:  # секреты браузер не знает — подставляем сохранённые значения
+        if e.get("secret") and not env.get(e["key"]):
+            env[e["key"]] = e["value"]
+    result = await sandbox.run_code(body.code, body.data, env, limits, settings, envs.venv(pid),
                                     _firewall(body.firewall, settings))
     for event in result.network or []:
         runner.fw_event(pid, {**event, "source": "проверка кода"})
@@ -301,16 +316,26 @@ def create_project(body: CreateIn):
     return storage.create(body.name.strip() or "Новый проект")
 
 
+def _with_secrets(pid: str, graph: dict) -> dict:
+    """Граф с расшифрованными значениями секретов: пустые берутся из сохранённого проекта."""
+    stored = storage.load(pid).get("env") if storage.ID_RE.match(pid) else []
+    try:
+        return {**graph, "env": vault.unseal_env(graph.get("env"), stored)}
+    except vault.VaultError as e:
+        raise HTTPException(400, {"message": str(e), "issues": []}) from None
+
+
 @app.get("/api/projects/{pid}")
 def get_project(pid: str):
     project = _load(pid)
-    return {**project, "running": pid in runner.apps}
+    return {**project, "env": vault.mask_env(project.get("env")), "running": pid in runner.apps}
 
 
 @app.put("/api/projects/{pid}")
 def save_project(pid: str, body: GraphIn):
     _load(pid)
-    return storage.save(pid, body.model_dump())
+    saved = storage.save(pid, body.model_dump())
+    return {**saved, "env": vault.mask_env(saved.get("env"))}
 
 
 @app.delete("/api/projects/{pid}")
@@ -337,7 +362,8 @@ def restore_version(pid: str, version: str):
         old = storage.load_version(pid, version)
     except storage.NotFound:
         raise HTTPException(404, "версия не найдена") from None
-    return storage.save(pid, old)
+    saved = storage.save(pid, old)
+    return {**saved, "env": vault.mask_env(saved.get("env"))}
 
 
 @app.post("/api/validate")
@@ -362,7 +388,7 @@ def validate(body: GraphIn, project_id: str | None = None):
 
 @app.post("/api/projects/{pid}/run")
 def run_project(pid: str):
-    project = _load(pid)
+    project = _with_secrets(pid, _load(pid))
     compiled = _compile(project)
     db = _open_db(pid, compiled)
     sub = build_app(compiled, db, runner.log(pid), lambda: envs.venv(pid),
@@ -386,7 +412,7 @@ class _Preview:
 
     def __init__(self, pid: str, graph: GraphIn):
         self.pid = pid
-        self.compiled = _compile(graph.model_dump())
+        self.compiled = _compile(_with_secrets(pid, graph.model_dump()))
         self.db = _open_db(pid, self.compiled)
         self.log: deque = deque(maxlen=1)
         self.app = build_app(self.compiled, self.db, self.log, lambda: envs.venv(pid),
