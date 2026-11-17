@@ -19,8 +19,8 @@ from .pyenv import validate_packages
 from .firewall import FirewallSettings
 from .sandbox import SandboxSettings
 from .blocks import (
-    AUTH_SCHEMES, BLOCKS, DB_OPS, FIELD_TYPES, HTTP_METHODS, INPUT_SOURCES,
-    MODEL_FIELD_TYPES, VALIDATION_OPS, can_connect,
+    AUTH_SCHEMES, BLOCKS, DB_OPS, FIELD_TYPES, FILTER_OPS, HTTP_METHODS, INPUT_SOURCES,
+    MODEL_FIELD_TYPES, ON_DELETE, VALIDATION_OPS, can_connect,
 )
 
 IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -106,6 +106,13 @@ class AuthStep:
 
 
 @dataclass
+class Filter:
+    field: str
+    op: str
+    value: Assignment
+
+
+@dataclass
 class DbStep:
     node_id: str
     model: str
@@ -113,10 +120,14 @@ class DbStep:
     target: str
     id_value: Assignment | None = None
     values: list[Assignment] = field(default_factory=list)
-    filters: list[Assignment] = field(default_factory=list)
+    filters: list[Filter] = field(default_factory=list)
     limit: int = 100
     order_by: str = "id"
     descending: bool = False
+    offset: Assignment | None = None
+    limit_value: Assignment | None = None  # лимит-выражение (например, per_page); иначе — limit
+    count_target: str | None = None    # list: куда положить общее число подходящих записей
+    include: list[str] = field(default_factory=list)  # ref-поля, чьи записи подтянуть
     kind: str = "db"
 
 
@@ -200,14 +211,25 @@ class EndpointPlan:
 @dataclass
 class ModelSpec:
     name: str
-    fields: list[dict]  # [{"name", "type"}]
+    fields: list[dict]  # [{"id", "name", "type", "ref"?, "on_delete"?}]
+    id: str | None = None
 
     @property
     def field_names(self) -> set[str]:
         return {f["name"] for f in self.fields}
 
+    def field(self, name: str) -> dict | None:
+        return next((f for f in self.fields if f["name"] == name), None)
+
+    @property
+    def ref_fields(self) -> list[str]:
+        return [f["name"] for f in self.fields if f["type"] == "ref"]
+
     def as_dict(self) -> dict:
-        return {"name": self.name, "fields": self.fields}
+        d = {"name": self.name, "fields": self.fields}
+        if self.id:
+            d["id"] = self.id
+        return d
 
 
 @dataclass
@@ -335,9 +357,23 @@ def _compile_models(raw: Any, err) -> list[ModelSpec]:
                 ok = False
                 continue
             fseen.add(fname)
-            fields.append({"name": fname, "type": ftype})
+            spec = {"name": fname, "type": ftype}
+            if f.get("id"):
+                spec["id"] = str(f["id"])
+            if ftype == "ref":
+                spec["ref"] = f.get("ref")
+                spec["on_delete"] = f.get("on_delete") or "restrict"
+                if spec["on_delete"] not in ON_DELETE:
+                    err(None, f"модель {name}: поле «{fname}» — неизвестное действие при удалении")
+                    ok = False
+            fields.append(spec)
         if ok:
-            models.append(ModelSpec(name, fields))
+            models.append(ModelSpec(name, fields, str(m["id"]) if m.get("id") else None))
+    names = {m.name for m in models}
+    for m in models:  # ссылки проверяем, когда известны все модели
+        for f in m.fields:
+            if f["type"] == "ref" and f.get("ref") not in names:
+                err(None, f"модель {m.name}: поле «{f['name']}» ссылается на неизвестную модель «{f.get('ref') or '—'}»")
     return models
 
 
@@ -683,14 +719,50 @@ class _EndpointCompiler:
                 missing = [f["name"] for f in model.fields if f["name"] not in {a.target for a in step.values}]
                 if missing:
                     self.err_warn(cur, f"при создании не заданы поля {', '.join(missing)} — будут пустыми")
+        if op in ("get", "list"):
+            for name in ndata.get("include") or []:
+                if name not in model.ref_fields:
+                    self.fail(cur, f"«{name}» — не поле-связь модели {model.name}")
+                else:
+                    step.include.append(name)
+                    if model.field(name)["ref"] not in self.models:
+                        self.fail(cur, f"связь {name}: модель не найдена")
         if op == "list":
-            step.filters = self._model_fields(cur, model, ndata.get("filters") or [], known, "фильтр")
-            try:
-                step.limit = int(ndata.get("limit") or 100)
+            for it in ndata.get("filters") or []:
+                fname, fop = it.get("field"), it.get("op") or "eq"
+                if fname != "id" and fname not in model.field_names:
+                    self.fail(cur, f"фильтр: у модели {model.name} нет поля «{fname}»")
+                    continue
+                if fop not in FILTER_OPS:
+                    self.fail(cur, f"фильтр {fname}: неизвестная операция «{fop}»")
+                    continue
+                expr_src = it.get("expr", "")
+                if fop == "is_null" and not str(expr_src).strip():
+                    expr_src = "True"
+                values = self._assignments(cur, [{"target": fname, "expr": expr_src}], known, "target",
+                                           keys_are_json=True)
+                if values:
+                    step.filters.append(Filter(fname, fop, values[0]))
+            if str(ndata.get("offset_expr") or "").strip():
+                offs = self._assignments(cur, [{"target": "offset", "expr": ndata["offset_expr"]}], known,
+                                         "target", keys_are_json=True)
+                step.offset = offs[0] if offs else None
+            count_target = str(ndata.get("count_target") or "").strip()
+            if count_target:
+                if msg := _check_ident(count_target, "поле для количества"):
+                    self.fail(cur, msg)
+                else:
+                    step.count_target = count_target
+                    known[count_target] = "int"
+            raw_limit = str(ndata.get("limit") or "100").strip()
+            if raw_limit.lstrip("-").isdigit():
+                step.limit = int(raw_limit)
                 if not 1 <= step.limit <= 1000:
-                    raise ValueError
-            except (TypeError, ValueError):
-                self.fail(cur, "лимит должен быть целым числом от 1 до 1000")
+                    self.fail(cur, "лимит должен быть от 1 до 1000 (или выражением, например per_page)")
+            else:
+                lims = self._assignments(cur, [{"target": "limit", "expr": raw_limit}], known, "target",
+                                         keys_are_json=True)
+                step.limit_value = lims[0] if lims else None
             order_by = ndata.get("order_by") or "id"
             if order_by != "id" and order_by not in model.field_names:
                 self.fail(cur, f"сортировка по неизвестному полю «{order_by}»")

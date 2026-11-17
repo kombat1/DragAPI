@@ -1,5 +1,6 @@
 import copy
 import importlib.util
+import re
 import json
 import sys
 from pathlib import Path
@@ -58,14 +59,15 @@ def test_order_crud(client):
     r = client.post("/orders", json={"item": "pen", "price": 400.5, "qty": 3})
     assert r.status_code == 201
     order = r.json()["order"]
-    assert order == {"id": 1, "item": "pen", "price": 400.5, "qty": 3, "total": 1201.5, "status": "new"}
+    assert order == {"id": 1, "item": "pen", "price": 400.5, "qty": 3, "total": 1201.5, "status": "new",
+                     "customer_id": None}
     client.post("/orders", json={"item": "cup", "price": 2})
 
     listing = client.get("/orders").json()
-    assert listing["count"] == 2 and [o["item"] for o in listing["items"]] == ["cup", "pen"]
-    assert len(client.get("/orders", params={"limit": 1}).json()["items"]) == 1
+    assert listing["total"] == 2 and [o["item"] for o in listing["items"]] == ["cup", "pen"]
+    assert len(client.get("/orders", params={"per_page": 1}).json()["items"]) == 1
 
-    assert client.get("/orders/1").json() == {"order": order}
+    assert client.get("/orders/1").json() == {"order": {**order, "customer": None}}
     r = client.get("/orders/99")
     assert r.status_code == 404 and r.json() == {"error": "Заказ 99 не найден"}
 
@@ -83,7 +85,7 @@ def test_order_validation(client):
     r = client.post("/orders", json={"item": "p", "price": 1, "qty": 0})
     assert r.status_code == 422
     assert r.json()["errors"] == ["Количество должно быть не меньше 1", "длина item должна быть ≥ 2"]
-    assert client.get("/orders").json()["count"] == 0  # невалидный заказ не сохранён
+    assert client.get("/orders").json()["total"] == 0  # невалидный заказ не сохранён
 
 
 def test_order_type_error(client):
@@ -246,9 +248,9 @@ def test_platform_run_flow(tmp_path, monkeypatch):
     assert c.get(f"/run/{pid}/hello").status_code == 404  # ещё не запущен
     assert c.get(f"/api/projects/{pid}/data").status_code == 409
     run = c.post(f"/api/projects/{pid}/run").json()
-    assert run["ok"] and len(run["routes"]) == 7
+    assert run["ok"] and len(run["routes"]) == 8
     assert c.post(f"/run/{pid}/orders", json={"item": "pen", "price": 3}).status_code == 201
-    assert c.get(f"/api/projects/{pid}/data").json() == [{"model": "orders", "count": 1}]
+    assert {"model": "orders", "count": 1} in c.get(f"/api/projects/{pid}/data").json()
     rows = c.get(f"/api/projects/{pid}/data/orders").json()
     assert rows["rows"][0]["item"] == "pen" and "status" in rows["columns"]
 
@@ -271,7 +273,8 @@ def test_exported_fstrings_are_portable():
     # без f-строк в экспорте нет конструкций, которые есть только в Python 3.12+
     assert expr.to_python(expr.parse("f'#{n:03d} {s!r}'")) == "'#' + format(ctx['n'], '03d') + ' ' + format(repr(ctx['s']), '')"
     source = codegen.generate(compile_project(EXAMPLE))
-    assert "f'" not in source.split("# --- конец runtime ---")[-1].replace("(f'Bearer", "")
+    generated = source.split("# --- конец runtime ---")[-1].replace("(f'Bearer", "")
+    assert not re.search(r"(?<![A-Za-z0-9_])f'", generated)
 
 
 # --- блок «Python-код» ---
@@ -797,3 +800,154 @@ def test_seed_examples(tmp_path, monkeypatch):
     assert storage.seed_examples() == 1
     assert storage.seed_examples() == 0  # уже есть проекты — не трогаем
     assert "dev-secret" not in (tmp_path / "p" / "example-shop.json").read_text()
+
+
+
+# --- шаг 3: связи, миграции, фильтры, пагинация ---
+
+def test_relations_filters_pagination(client):
+    alice = client.post("/customers", json={"name": "Alice", "email": "ALICE@x.io"}).json()["customer"]
+    assert alice == {"id": 1, "name": "Alice", "email": "alice@x.io"}
+    assert client.post("/customers", json={"name": "B", "email": "nope"}).status_code == 422
+    for i, (item, price) in enumerate([("pen", 1), ("pencil", 5), ("cup", 30), ("pen holder", 12)]):
+        r = client.post("/orders", json={"item": item, "price": price, "customer_id": 1 if i % 2 == 0 else None})
+        assert r.status_code == 201
+    # заказ на несуществующего клиента — 409, не 500
+    r = client.post("/orders", json={"item": "ghost", "price": 1, "customer_id": 99})
+    assert r.status_code == 409 and "связь" in r.json()["error"]
+
+    page = client.get("/orders", params={"q": "pen", "per_page": 2, "page": 1}).json()
+    assert page["total"] == 3 and page["pages"] == 2 and [o["item"] for o in page["items"]] == ["pen holder", "pencil"]
+    page2 = client.get("/orders", params={"q": "pen", "per_page": 2, "page": 2}).json()
+    assert [o["item"] for o in page2["items"]] == ["pen"] and page2["items"][0]["customer"]["name"] == "Alice"
+    assert client.get("/orders", params={"min_total": 10}).json()["total"] == 2
+    assert client.get("/orders", params={"status": "new", "q": "cup"}).json()["total"] == 1
+    assert client.get("/orders/1").json()["order"]["customer"] == alice
+
+
+def _db(tmp_path, models, name="m.sqlite"):
+    return Database(f"sqlite:///{tmp_path / name}", models)
+
+
+def test_migrations_rename_type_extra(tmp_path):
+    v1 = [{"id": "m1", "name": "items", "fields": [
+        {"id": "a", "name": "title", "type": "str"}, {"id": "b", "name": "qty", "type": "str"},
+        {"id": "c", "name": "note", "type": "str"}]}]
+    db = _db(tmp_path, v1)
+    db.insert("items", {"title": "x", "qty": "42", "note": "n"})
+    db.insert("items", {"title": "y", "qty": "7", "note": "n"})
+    db.delete("items", 2)
+    db.dispose()
+
+    # переименовали поле и модель, сменили тип, убрали поле
+    v2 = [{"id": "m1", "name": "products", "fields": [
+        {"id": "a", "name": "name", "type": "str"}, {"id": "b", "name": "qty", "type": "int"}]}]
+    plan = Database(f"sqlite:///{tmp_path / 'm.sqlite'}", v2, apply_migrations=False).plan()
+    ops = {(o["op"], o.get("field") or o.get("old")) for o in plan}
+    assert ("rename_table", "items") in ops and ("rename_column", "name") in ops
+    assert ("change_type", "qty") in ops and ("extra_column", "note") in ops
+
+    db = _db(tmp_path, v2)
+    # данные пережили переименование и смену типа; убранное из модели поле сохранено до явного удаления
+    assert db.get("products", 1) == {"id": 1, "name": "x", "qty": 42}
+    with db.engine.connect() as conn:
+        assert conn.exec_driver_sql("SELECT note FROM products WHERE id = 1").scalar() == "n"
+    assert db.insert("products", {"name": "z", "qty": 1})["id"] == 3  # id 2 не переиспользован
+    assert db.plan() == [{"op": "extra_column", "model": "products", "field": "note"}]
+    db.migrate(drop_extra=True)
+    assert "note" not in db.get("products", 1) and db.plan() == []
+    db.dispose()
+
+
+def test_migrations_legacy_db_without_snapshot(tmp_path):
+    import sqlalchemy as sa
+    engine = sa.create_engine(f"sqlite:///{tmp_path / 'old.sqlite'}")
+    with engine.begin() as conn:
+        conn.exec_driver_sql("CREATE TABLE orders (id INTEGER PRIMARY KEY, item VARCHAR)")
+        conn.exec_driver_sql("INSERT INTO orders (item) VALUES ('legacy')")
+    engine.dispose()
+    db = Database(f"sqlite:///{tmp_path / 'old.sqlite'}", [{"name": "orders", "fields": [
+        {"name": "item", "type": "str"}, {"id": "n", "name": "price", "type": "float"}]}])
+    assert db.applied == [{"op": "add_column", "model": "orders", "field": "price", "type": "float"}]
+    assert db.get("orders", 1) == {"id": 1, "item": "legacy", "price": None}
+
+
+@pytest.mark.parametrize("on_delete, expected", [("restrict", "error"), ("cascade", "gone"), ("set_null", "null")])
+def test_relation_on_delete(tmp_path, on_delete, expected):
+    from app.runtime import DatabaseError
+    db = _db(tmp_path, [
+        {"id": "c", "name": "customers", "fields": [{"id": "n", "name": "name", "type": "str"}]},
+        {"id": "o", "name": "orders", "fields": [
+            {"id": "r", "name": "customer_id", "type": "ref", "ref": "customers", "on_delete": on_delete}]}])
+    db.insert("customers", {"name": "A"})
+    db.insert("orders", {"customer_id": 1})
+    if expected == "error":
+        with pytest.raises(DatabaseError, match="связь"):
+            db.delete("customers", 1)
+    else:
+        assert db.delete("customers", 1)
+        assert (db.get("orders", 1) is None) if expected == "gone" else (db.get("orders", 1)["customer_id"] is None)
+    db.clear_all()
+    assert db.count("orders") == 0 and db.insert("customers", {"name": "B"})["id"] == 1
+
+
+def test_filter_ops(tmp_path):
+    db = _db(tmp_path, [{"name": "t", "fields": [{"name": "s", "type": "str"}, {"name": "n", "type": "int"}]}])
+    for s_, n in [("apple", 1), ("banana", 5), ("cherry", None), ("100%_off", 9)]:
+        db.insert("t", {"s": s_, "n": n})
+
+    def ids(filters):
+        return [r["id"] for r in db.list("t", filters)]
+    assert ids([("n", "gt", 1)]) == [2, 4]
+    assert ids([("n", "lte", 5), ("s", "startswith", "b")]) == [2]
+    assert ids([("s", "contains", "%_")]) == [4]          # спецсимволы LIKE экранируются
+    assert ids([("s", "in", ["apple", "cherry"])]) == [1, 3]
+    assert ids([("n", "is_null", True)]) == [3] and ids([("n", "is_null", False)]) == [1, 2, 4]
+    assert ids([("n", "ne", 5)]) == [1, 4]                 # NULL не равен и не «не равен» (как в SQL)
+    assert ids([("s", "eq", None), ("n", "gte", "")]) == [1, 2, 3, 4]  # пустые фильтры пропускаются
+    assert db.count("t", [("n", "gte", 5)]) == 2
+    assert [r["id"] for r in db.list("t", [], limit=2, offset=1)] == [2, 3]
+
+
+def test_schema_plan_api(tmp_path, monkeypatch):
+    c, pid = _platform(tmp_path, monkeypatch)
+    c.put(f"/api/projects/{pid}", json=_graph_body())
+    c.post(f"/api/projects/{pid}/run")
+    models = copy.deepcopy(EXAMPLE["models"])
+    models[1]["fields"][0]["name"] = "title"  # item -> title (тот же id)
+    plan = c.post(f"/api/projects/{pid}/schema/plan", json={"models": models}).json()["ops"]
+    assert plan == [{"op": "rename_column", "model": "orders", "old": "item", "field": "title"}]
+
+
+def test_migration_fields_get_ids_later(tmp_path):
+    no_ids = [{"name": "t", "fields": [{"name": "a", "type": "str"}]}]
+    _db(tmp_path, no_ids).insert("t", {"a": "x"})
+    with_ids = [{"id": "m", "name": "t", "fields": [{"id": "fa", "name": "a", "type": "str"}]}]
+    db = _db(tmp_path, with_ids)
+    assert db.applied == [] and db.get("t", 1) == {"id": 1, "a": "x"}
+    renamed = [{"id": "m", "name": "t", "fields": [{"id": "fa", "name": "b", "type": "str"}]}]
+    db.dispose()
+    db = _db(tmp_path, renamed)
+    assert db.get("t", 1) == {"id": 1, "b": "x"}
+
+
+def test_rebuild_table_with_relation(tmp_path):
+    from app.runtime import DatabaseError
+    v1 = [{"id": "c", "name": "customers", "fields": [{"id": "n", "name": "name", "type": "str"}]},
+          {"id": "o", "name": "orders", "fields": [
+              {"id": "q", "name": "qty", "type": "int"},
+              {"id": "r", "name": "customer_id", "type": "ref", "ref": "customers", "on_delete": "restrict"}]}]
+    db = _db(tmp_path, v1)
+    db.insert("customers", {"name": "A"})
+    db.insert("orders", {"qty": 3, "customer_id": 1})
+    db.dispose()
+    v2 = copy.deepcopy(v1)
+    v2[1]["fields"][0]["type"] = "str"          # смена типа -> перестройка таблицы со связью
+    v2[1]["fields"][1]["name"] = "client_id"    # и переименование поля-связи
+    db = _db(tmp_path, v2)
+    assert {o["op"] for o in db.applied} == {"rename_column", "change_type"}
+    assert db.get("orders", 1) == {"id": 1, "qty": "3", "client_id": 1}
+    with pytest.raises(DatabaseError):          # связь по-прежнему соблюдается
+        db.insert("orders", {"qty": "1", "client_id": 42})
+    with pytest.raises(DatabaseError):
+        db.delete("customers", 1)

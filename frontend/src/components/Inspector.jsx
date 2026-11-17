@@ -262,6 +262,19 @@ const DB_OPS = {
   delete: 'удалить по id (True/False)',
 }
 
+const FILTER_OPS = {
+  eq: '=',
+  ne: '≠',
+  gt: '>',
+  gte: '≥',
+  lt: '<',
+  lte: '≤',
+  contains: 'содержит',
+  startswith: 'начинается с',
+  in: 'в списке',
+  is_null: 'пусто (True/False)',
+}
+
 const AUTH_SCHEMES = {
   api_key_header: 'API-ключ в заголовке',
   api_key_query: 'API-ключ в query-параметре',
@@ -300,6 +313,7 @@ export default function Inspector({ node, onChange, onDelete, issues, availableF
   const envKeys = env.map((e) => e.key).filter(Boolean)
   const model = models.find((m) => m.name === d.model)
   const modelFields = model ? model.fields.map((f) => f.name).filter(Boolean) : []
+  const refFields = model ? model.fields.filter((f) => f.type === 'ref' && f.name) : []
 
   return (
     <div className={`inspector ${node.type === 'code' ? 'wide' : ''}`}>
@@ -524,18 +538,44 @@ export default function Inspector({ node, onChange, onDelete, issues, availableF
               )}
             </Field>
           )}
+          {(d.op === 'get' || d.op === 'list') && refFields.length > 0 && (
+            <Field label="Подтянуть связанные записи" hint="customer_id → в результате появится customer с данными клиента">
+              <div className="checks">
+                {refFields.map((f) => (
+                  <label key={f.name} className="check">
+                    <input
+                      type="checkbox"
+                      checked={(d.include || []).includes(f.name)}
+                      onChange={(e) =>
+                        set({
+                          include: e.target.checked
+                            ? [...(d.include || []), f.name]
+                            : (d.include || []).filter((x) => x !== f.name),
+                        })
+                      }
+                    />
+                    <code>{f.name}</code> → {f.ref}
+                  </label>
+                ))}
+              </div>
+            </Field>
+          )}
           {d.op === 'list' && (
             <>
-              <Field label="Фильтры (поле == значение)">
+              <Field
+                label="Фильтры"
+                hint="Если значение пустое (необязательный параметр не передан) — фильтр пропускается. «в списке» ждёт список: [1, 2] или поле-список."
+              >
                 <ListEditor
                   items={d.filters || []}
                   onChange={(filters) => set({ filters })}
                   empty="Без фильтров — все записи"
                   addLabel="фильтр"
-                  newItem={() => ({ field: modelFields[0] || '', expr: '' })}
+                  newItem={() => ({ field: modelFields[0] || '', op: 'eq', expr: '' })}
                   columns={[
-                    { key: 'field', label: 'поле', options: modelFields.length ? modelFields : [''], flex: 1.3 },
-                    { key: 'expr', label: 'выражение', mono: true, flex: 2.2 },
+                    { key: 'field', label: 'поле', options: ['id', ...modelFields], flex: 1.2 },
+                    { key: 'op', label: 'условие', options: catalog.filter_ops, labels: FILTER_OPS, flex: 1.1 },
+                    { key: 'expr', label: 'значение (выражение)', mono: true, flex: 1.8 },
                   ]}
                 />
               </Field>
@@ -557,7 +597,15 @@ export default function Inspector({ node, onChange, onDelete, issues, availableF
                   </select>
                 </Field>
                 <Field label="Лимит">
-                  <input type="number" value={d.limit ?? 100} onChange={(e) => set({ limit: e.target.value })} />
+                  <input className="mono" value={d.limit ?? 100} onChange={(e) => set({ limit: e.target.value })} title="Число 1–1000 или выражение, например per_page" />
+                </Field>
+              </div>
+              <div className="list-row">
+                <Field label="Смещение (offset)" hint="Например, (page - 1) * per_page">
+                  <input className="mono" value={d.offset_expr || ''} placeholder="0" onChange={(e) => set({ offset_expr: e.target.value })} />
+                </Field>
+                <Field label="Всего записей → в поле" hint="Число всех подходящих записей (для пагинации)">
+                  <input className="mono" value={d.count_target || ''} placeholder="total_count" onChange={(e) => set({ count_target: e.target.value })} />
                 </Field>
               </div>
             </>

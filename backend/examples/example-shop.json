@@ -3,27 +3,56 @@
   "name": "Пример: магазин",
   "models": [
     {
+      "id": "m-customers",
+      "name": "customers",
+      "fields": [
+        {
+          "id": "f-c-name",
+          "name": "name",
+          "type": "str"
+        },
+        {
+          "id": "f-c-email",
+          "name": "email",
+          "type": "str"
+        }
+      ]
+    },
+    {
+      "id": "m-orders",
       "name": "orders",
       "fields": [
         {
+          "id": "f-o-item",
           "name": "item",
           "type": "str"
         },
         {
+          "id": "f-o-price",
           "name": "price",
           "type": "float"
         },
         {
+          "id": "f-o-qty",
           "name": "qty",
           "type": "int"
         },
         {
+          "id": "f-o-total",
           "name": "total",
           "type": "float"
         },
         {
+          "id": "f-o-status",
           "name": "status",
           "type": "str"
+        },
+        {
+          "id": "f-o-customer",
+          "name": "customer_id",
+          "type": "ref",
+          "ref": "customers",
+          "on_delete": "set_null"
         }
       ]
     }
@@ -144,6 +173,12 @@
             "type": "int",
             "required": false,
             "default": 1
+          },
+          {
+            "name": "customer_id",
+            "type": "int",
+            "required": false,
+            "default": null
           }
         ]
       }
@@ -223,6 +258,10 @@
           {
             "field": "status",
             "expr": "'new'"
+          },
+          {
+            "field": "customer_id",
+            "expr": "customer_id"
           }
         ]
       }
@@ -254,7 +293,7 @@
       "data": {
         "method": "GET",
         "path": "/orders",
-        "summary": "Список заказов"
+        "summary": "Список заказов: фильтры и страницы"
       }
     },
     {
@@ -268,10 +307,61 @@
         "source": "query",
         "fields": [
           {
-            "name": "limit",
+            "name": "q",
+            "type": "str",
+            "required": false,
+            "default": ""
+          },
+          {
+            "name": "status",
+            "type": "str",
+            "required": false,
+            "default": ""
+          },
+          {
+            "name": "min_total",
+            "type": "float",
+            "required": false,
+            "default": null
+          },
+          {
+            "name": "page",
             "type": "int",
             "required": false,
-            "default": 50
+            "default": 1
+          },
+          {
+            "name": "per_page",
+            "type": "int",
+            "required": false,
+            "default": 20
+          }
+        ]
+      }
+    },
+    {
+      "id": "list-check",
+      "type": "validate",
+      "position": {
+        "x": 620,
+        "y": 540
+      },
+      "data": {
+        "rules": [
+          {
+            "field": "page",
+            "op": "min",
+            "value": "1"
+          },
+          {
+            "field": "per_page",
+            "op": "min",
+            "value": "1"
+          },
+          {
+            "field": "per_page",
+            "op": "max",
+            "value": "100"
           }
         ]
       }
@@ -280,36 +370,65 @@
       "id": "list-db",
       "type": "db",
       "position": {
-        "x": 620,
+        "x": 910,
         "y": 540
       },
       "data": {
         "model": "orders",
         "op": "list",
         "target": "orders",
-        "filters": [],
-        "limit": "100",
+        "filters": [
+          {
+            "field": "item",
+            "op": "contains",
+            "expr": "q"
+          },
+          {
+            "field": "status",
+            "op": "eq",
+            "expr": "status"
+          },
+          {
+            "field": "total",
+            "op": "gte",
+            "expr": "min_total"
+          }
+        ],
+        "limit": "per_page",
+        "offset_expr": "(page - 1) * per_page",
+        "count_target": "total_count",
         "order_by": "id",
-        "descending": true
+        "descending": true,
+        "include": [
+          "customer_id"
+        ]
       }
     },
     {
       "id": "list-out",
       "type": "response",
       "position": {
-        "x": 910,
+        "x": 1200,
         "y": 540
       },
       "data": {
         "status": 200,
         "body": [
           {
-            "key": "count",
-            "expr": "len(orders)"
+            "key": "items",
+            "expr": "orders"
           },
           {
-            "key": "items",
-            "expr": "orders[:limit]"
+            "key": "total",
+            "expr": "total_count"
+          },
+          {
+            "key": "page",
+            "expr": "page"
+          },
+          {
+            "key": "pages",
+            "expr": "(total_count + per_page - 1) // per_page"
           }
         ]
       }
@@ -356,7 +475,10 @@
         "model": "orders",
         "op": "get",
         "target": "order",
-        "id_expr": "order_id"
+        "id_expr": "order_id",
+        "include": [
+          "customer_id"
+        ]
       }
     },
     {
@@ -616,11 +738,105 @@
       }
     },
     {
-      "id": "upload",
+      "id": "customer",
       "type": "endpoint",
       "position": {
         "x": 40,
         "y": 1540
+      },
+      "data": {
+        "method": "POST",
+        "path": "/customers",
+        "summary": "Создать клиента"
+      }
+    },
+    {
+      "id": "customer-in",
+      "type": "input",
+      "position": {
+        "x": 330,
+        "y": 1540
+      },
+      "data": {
+        "source": "json",
+        "fields": [
+          {
+            "name": "name",
+            "type": "str",
+            "required": true
+          },
+          {
+            "name": "email",
+            "type": "str",
+            "required": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "customer-check",
+      "type": "validate",
+      "position": {
+        "x": 620,
+        "y": 1540
+      },
+      "data": {
+        "rules": [
+          {
+            "field": "email",
+            "op": "regex",
+            "value": "[^@\\s]+@[^@\\s]+\\.[a-zA-Z]{2,}",
+            "message": "некорректный email"
+          }
+        ]
+      }
+    },
+    {
+      "id": "customer-db",
+      "type": "db",
+      "position": {
+        "x": 910,
+        "y": 1540
+      },
+      "data": {
+        "model": "customers",
+        "op": "insert",
+        "target": "customer",
+        "values": [
+          {
+            "field": "name",
+            "expr": "name"
+          },
+          {
+            "field": "email",
+            "expr": "lower(email)"
+          }
+        ]
+      }
+    },
+    {
+      "id": "customer-out",
+      "type": "response",
+      "position": {
+        "x": 1200,
+        "y": 1540
+      },
+      "data": {
+        "status": 201,
+        "body": [
+          {
+            "key": "customer",
+            "expr": "customer"
+          }
+        ]
+      }
+    },
+    {
+      "id": "upload",
+      "type": "endpoint",
+      "position": {
+        "x": 40,
+        "y": 1790
       },
       "data": {
         "method": "POST",
@@ -633,7 +849,7 @@
       "type": "input",
       "position": {
         "x": 330,
-        "y": 1540
+        "y": 1790
       },
       "data": {
         "source": "form",
@@ -657,7 +873,7 @@
       "type": "response",
       "position": {
         "x": 620,
-        "y": 1540
+        "y": 1790
       },
       "data": {
         "status": 200,
@@ -725,8 +941,13 @@
       "target": "list-in"
     },
     {
-      "id": "e-list-in-list-db",
+      "id": "e-list-in-list-check",
       "source": "list-in",
+      "target": "list-check"
+    },
+    {
+      "id": "e-list-check-list-db",
+      "source": "list-check",
       "target": "list-db"
     },
     {
@@ -812,6 +1033,26 @@
       "id": "e-stats-code-stats-out",
       "source": "stats-code",
       "target": "stats-out"
+    },
+    {
+      "id": "e-customer-customer-in",
+      "source": "customer",
+      "target": "customer-in"
+    },
+    {
+      "id": "e-customer-in-customer-check",
+      "source": "customer-in",
+      "target": "customer-check"
+    },
+    {
+      "id": "e-customer-check-customer-db",
+      "source": "customer-check",
+      "target": "customer-db"
+    },
+    {
+      "id": "e-customer-db-customer-out",
+      "source": "customer-db",
+      "target": "customer-out"
     },
     {
       "id": "e-upload-upload-in",

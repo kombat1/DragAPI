@@ -19,6 +19,40 @@ import Inspector from './components/Inspector.jsx'
 import BottomPanel from './components/BottomPanel.jsx'
 import ProjectSettings from './components/ProjectSettings.jsx'
 import { DEFAULT_FIREWALL, normalizeFirewall } from './components/FirewallTab.jsx'
+import { newId } from './components/ProjectSettings.jsx'
+
+// Переименования между двумя версиями моделей -> функция, обновляющая данные блока «База данных».
+function renameRefs(before, after) {
+  const modelNames = {}
+  const fieldNames = {} // по новому имени модели: {старое поле: новое}
+  for (const m of after) {
+    const old = before.find((x) => x.id && x.id === m.id)
+    if (!old) continue
+    if (old.name !== m.name) modelNames[old.name] = m.name
+    for (const f of m.fields || []) {
+      const of = (old.fields || []).find((x) => x.id && x.id === f.id)
+      if (of && of.name !== f.name && of.name) (fieldNames[m.name] ||= {})[of.name] = f.name
+    }
+  }
+  if (!Object.keys(modelNames).length && !Object.keys(fieldNames).length) return null
+  return (d) => {
+    const model = modelNames[d.model] || d.model
+    const map = fieldNames[model] || {}
+    const rn = (name) => map[name] || name
+    return {
+      ...d,
+      model,
+      values: (d.values || []).map((v) => ({ ...v, field: rn(v.field) })),
+      filters: (d.filters || []).map((v) => ({ ...v, field: rn(v.field) })),
+      include: (d.include || []).map(rn),
+      order_by: d.order_by ? rn(d.order_by) : d.order_by,
+    }
+  }
+}
+
+// постоянные id у моделей и полей: по ним миграции отличают переименование от «удалить и создать»
+const withIds = (models) =>
+  models.map((m) => ({ ...m, id: m.id || newId(), fields: (m.fields || []).map((f) => ({ ...f, id: f.id || newId() })) }))
 
 const uid = () => Math.random().toString(36).slice(2, 9)
 
@@ -121,7 +155,7 @@ function Editor({ catalog, projectId, onProjectsChanged }) {
       setName(p.name)
       setNodes(p.nodes || [])
       setEdges(p.edges || [])
-      setModels(p.models || [])
+      setModels(withIds(p.models || []))
       setEnv(p.env || [])
       setSandbox(p.sandbox || {})
       setLibraries({ packages: [], only_binary: true, ...(p.libraries || {}) })
@@ -455,7 +489,12 @@ function Editor({ catalog, projectId, onProjectsChanged }) {
           initialTab={settingsOpen}
           project={{ models, env, sandbox, libraries, firewall }}
           setProject={(patch) => {
-            if (patch.models) setModels(patch.models)
+            if (patch.models) {
+              // переименования моделей и полей (по постоянным id) переносим в блоки «База данных»
+              const renamed = renameRefs(models, patch.models)
+              if (renamed) setNodes((ns) => ns.map((n) => (n.type === 'db' ? { ...n, data: renamed(n.data) } : n)))
+              setModels(patch.models)
+            }
             if (patch.env) setEnv(patch.env)
             if (patch.sandbox) setSandbox(patch.sandbox)
             if (patch.libraries) setLibraries(patch.libraries)

@@ -17,7 +17,9 @@ INPUT_SOURCES = ["json", "query", "path", "form"]
 FIELD_TYPES = ["str", "int", "float", "bool", "file"]
 VALIDATION_OPS = ["min", "max", "min_len", "max_len", "regex", "in"]
 DB_OPS = ["insert", "get", "list", "update", "delete"]
-MODEL_FIELD_TYPES = ["str", "int", "float", "bool"]
+MODEL_FIELD_TYPES = ["str", "int", "float", "bool", "ref"]
+ON_DELETE = ["restrict", "cascade", "set_null"]
+FILTER_OPS = ["eq", "ne", "gt", "gte", "lt", "lte", "contains", "startswith", "in", "is_null"]
 AUTH_SCHEMES = ["api_key_header", "api_key_query", "bearer"]
 
 BLOCKS = {
@@ -124,6 +126,8 @@ def catalog() -> dict:
         "validation_ops": VALIDATION_OPS,
         "db_ops": DB_OPS,
         "model_field_types": MODEL_FIELD_TYPES,
+        "on_delete": ON_DELETE,
+        "filter_ops": FILTER_OPS,
         "auth_schemes": AUTH_SCHEMES,
     }
 

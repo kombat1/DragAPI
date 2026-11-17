@@ -88,14 +88,19 @@ def _emit_step(step, out: list[str], pad: str, plan: EndpointPlan) -> None:
     elif isinstance(step, DbStep):
         out.append(f"{pad}# База данных: {step.op} {step.model} — блок {step.node_id}")
         record_id = to_python(step.id_value.tree) if step.id_value else None
+        filters = "[" + ", ".join(f"({f.field!r}, {f.op!r}, {to_python(f.value.tree)})" for f in step.filters) + "]"
+        offset = to_python(step.offset.tree) if step.offset else "0"
         args = {
             "insert": f"{_dict_literal(step.values)}",
-            "get": f"{record_id}",
-            "list": f"{_dict_literal(step.filters)}, {step.limit!r}, {step.order_by!r}, {step.descending!r}",
+            "get": f"{record_id}" + (f", {step.include!r}" if step.include else ""),
+            "list": f"{filters}, {to_python(step.limit_value.tree) if step.limit_value else repr(step.limit)}, "
+                    f"{step.order_by!r}, {step.descending!r}, {offset}, {step.include!r}",
             "update": f"{record_id}, {_dict_literal(step.values)}",
             "delete": f"{record_id}",
         }[step.op]
         out.append(f"{pad}ctx[{step.target!r}] = await run_in_threadpool(db.{step.op}, {step.model!r}, {args})")
+        if step.op == "list" and step.count_target:
+            out.append(f"{pad}ctx[{step.count_target!r}] = await run_in_threadpool(db.count, {step.model!r}, {filters})")
 
     elif isinstance(step, CodeStep):
         out.append(f"{pad}# Python-код — блок {step.node_id} (blocks/{step.module}.py)")
@@ -209,10 +214,13 @@ def generate(project: CompiledProject) -> str:
     parts.append("}")
 
     if project.uses_db:
-        parts += ["", f"MODELS = {[m.as_dict() for m in project.models]!r}",
+        parts += ["", "# Модели: id полей позволяют переименовывать поля без потери данных (миграции при старте)",
+                  f"MODELS = {[m.as_dict() for m in project.models]!r}",
                   "db = Database(os.environ.get('DATABASE_URL', 'sqlite:///./app.db'), MODELS)"]
 
     parts += ["", f"app = FastAPI(title={title!r})"]
+    if project.uses_db:
+        parts.append("install_db_error_handler(app)  # нарушение связей и т.п. -> 409")
     ingress = project.firewall.ingress
     if ingress.enabled:
         parts += ["", "# Firewall входящих запросов: первое совпавшее правило; иначе — значение по умолчанию.",

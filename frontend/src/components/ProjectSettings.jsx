@@ -12,22 +12,83 @@ export const SETTINGS_TABS = [
   ['libraries', 'Библиотеки'],
 ]
 
-function ModelsTab({ models, setModels }) {
+export const newId = () => Math.random().toString(36).slice(2, 10)
+
+const OP_VIEW = {
+  create_table: ['⊕', (o) => <>новая таблица <code>{o.model}</code></>, ''],
+  rename_table: ['✎', (o) => <>переименовать таблицу <code>{o.old}</code> → <code>{o.model}</code> (данные сохраняются)</>, ''],
+  add_column: ['+', (o) => <>новая колонка <code>{o.model}.{o.field}</code></>, ''],
+  rename_column: ['✎', (o) => <>переименовать <code>{o.model}.{o.old}</code> → <code>{o.field}</code> (данные сохраняются)</>, ''],
+  change_type: ['⟳', (o) => <>тип <code>{o.model}.{o.field}</code>: {o.old_type} → {o.type} — значения будут приведены, неприводимые станут 0 / пустыми</>, 'warn'],
+  extra_column: ['⚠', (o) => <>колонки <code>{o.model}.{o.field}</code> нет в модели — данные в ней сохранены, API её не видит</>, 'muted'],
+}
+
+function SchemaPlan({ projectId, models }) {
+  const [ops, setOps] = useState(null)
+  const [error, setError] = useState(null)
+  const key = JSON.stringify(models)
+  const refresh = () =>
+    api
+      .schemaPlan(projectId, models)
+      .then((r) => {
+        setOps(r.ops)
+        setError(null)
+      })
+      .catch((e) => setError(e.message))
+  useEffect(() => {
+    const t = setTimeout(refresh, 400)
+    return () => clearTimeout(t)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key, projectId])
+  if (error) return <div className="schema-plan muted">План схемы недоступен: {error}</div>
+  if (!ops) return null
+  const extra = ops.filter((o) => o.op === 'extra_column')
+  return (
+    <div className="schema-plan">
+      <div className="field-label">Превью-БД при следующем запуске</div>
+      {ops.length === 0 && <div className="muted">Схема совпадает с моделями — изменений нет.</div>}
+      {ops.map((o, i) => {
+        const [icon, text, cls] = OP_VIEW[o.op] || ['·', () => JSON.stringify(o), '']
+        return (
+          <div key={i} className={`plan-op ${cls}`}>
+            <span className="plan-icon">{icon}</span> {text(o)}
+          </div>
+        )
+      })}
+      {extra.length > 0 && (
+        <button
+          className="small danger"
+          onClick={async () => {
+            if (!confirm(`Удалить колонки ${extra.map((o) => o.model + '.' + o.field).join(', ')} вместе с данными?`)) return
+            await api.schemaDropExtra(projectId, models)
+            refresh()
+          }}
+        >
+          Удалить лишние колонки
+        </button>
+      )}
+    </div>
+  )
+}
+
+function ModelsTab({ projectId, models, setModels }) {
   const catalog = useCatalog()
+  const names = models.map((m) => m.name).filter(Boolean)
   const setModel = (i, patch) => setModels(models.map((m, j) => (j === i ? { ...m, ...patch } : m)))
   const removeModel = (i) => {
-    if (confirm(`Удалить модель «${models[i].name}»? Данные в превью-БД останутся, но блоки перестанут её видеть.`))
+    if (confirm(`Удалить модель «${models[i].name}»? Таблица и данные в превью-БД останутся, но блоки перестанут её видеть.`))
       setModels(models.filter((_, j) => j !== i))
   }
   return (
     <section>
       <p className="hint">
-        Каждая модель — таблица в базе. Поле <code>id</code> создаётся автоматически. Новые поля добавляются в
-        существующую таблицу при следующем запуске; смена типа существующего поля на уже созданные данные не влияет.
+        Каждая модель — таблица в базе, поле <code>id</code> создаётся автоматически. Поля можно переименовывать и
+        менять им тип — данные переносятся. Тип <b>ref</b> — ссылка на запись другой модели (внешний ключ): назовите поле
+        вроде <code>customer_id</code>, и блок БД сможет подтянуть связанную запись как <code>customer</code>.
       </p>
       {models.length === 0 && <div className="muted">Моделей пока нет.</div>}
       {models.map((m, i) => (
-        <div className="model-card" key={i}>
+        <div className="model-card" key={m.id || i}>
           <div className="model-head">
             <input
               className="mono model-name"
@@ -44,21 +105,40 @@ function ModelsTab({ models, setModels }) {
             onChange={(fields) => setModel(i, { fields })}
             empty="Нет полей — будет только id"
             addLabel="поле"
-            newItem={() => ({ name: '', type: 'str' })}
+            newItem={() => ({ id: newId(), name: '', type: 'str' })}
             columns={[
-              { key: 'name', label: 'поле', mono: true, flex: 2 },
-              { key: 'type', label: 'тип', options: catalog.model_field_types, flex: 1 },
+              { key: 'name', label: 'поле', mono: true, flex: 1.6 },
+              { key: 'type', label: 'тип', options: catalog.model_field_types, flex: 0.8 },
+              {
+                key: 'ref',
+                label: 'ссылка на',
+                options: ['', ...names.filter((n) => n !== m.name || true)],
+                disabled: (it) => it.type !== 'ref',
+                flex: 1.1,
+              },
+              {
+                key: 'on_delete',
+                label: 'при удалении',
+                options: catalog.on_delete,
+                labels: { restrict: 'запретить', cascade: 'удалить тоже', set_null: 'обнулить ссылку' },
+                disabled: (it) => it.type !== 'ref',
+                flex: 1.2,
+              },
             ]}
           />
         </div>
       ))}
       <button
         onClick={() =>
-          setModels([...models, { name: `model${models.length + 1}`, fields: [{ name: 'title', type: 'str' }] }])
+          setModels([
+            ...models,
+            { id: newId(), name: `model${models.length + 1}`, fields: [{ id: newId(), name: 'title', type: 'str' }] },
+          ])
         }
       >
         + Модель
       </button>
+      <SchemaPlan projectId={projectId} models={models} />
     </section>
   )
 }
@@ -396,7 +476,9 @@ export default function ProjectSettings({ projectId, project, setProject, issues
         )}
 
         <div className="settings-body">
-          {tab === 'models' && <ModelsTab models={project.models} setModels={(models) => setProject({ models })} />}
+          {tab === 'models' && (
+            <ModelsTab projectId={projectId} models={project.models} setModels={(models) => setProject({ models })} />
+          )}
           {tab === 'env' && <EnvTab env={project.env} setEnv={(env) => setProject({ env })} />}
           {tab === 'sandbox' && (
             <SandboxTab

@@ -24,7 +24,7 @@ from .graph import (
     AuthStep, Branch, Chain, CodeStep, CompiledProject, DbStep, EndpointPlan, FieldSpec, InputStep,
     LogicStep, ValidateStep, check_rule,
 )
-from .runtime import Database, apply_code_result, check_auth
+from .runtime import Database, DatabaseError, apply_code_result, check_auth
 
 PY_TYPES = {"str": str, "int": int, "float": float, "bool": bool, "file": UploadFile}
 JSON_PARAM = "json_body_"
@@ -164,20 +164,30 @@ class _Run:
         elif isinstance(step, DbStep):
             record_id = self.eval(step.node_id, step.id_value, "id") if step.id_value else None
             values = {a.target: self.eval(step.node_id, a) for a in step.values}
-            filters = {a.target: self.eval(step.node_id, a) for a in step.filters}
+            filters = [(f.field, f.op, self.eval(step.node_id, f.value, f"фильтр {f.field}")) for f in step.filters]
+            offset = self.eval(step.node_id, step.offset, "offset") if step.offset else 0
+            limit = self.eval(step.node_id, step.limit_value, "limit") if step.limit_value else step.limit
+            try:
+                limit, offset = int(limit if limit is not None else 100), int(offset or 0)
+            except (TypeError, ValueError):
+                raise StepFailure(step.node_id, 422, {"error": "limit и offset должны быть целыми числами"})
             db = self.db
             try:
                 if step.op == "insert":
                     result = await run_in_threadpool(db.insert, step.model, values)
                 elif step.op == "get":
-                    result = await run_in_threadpool(db.get, step.model, record_id)
+                    result = await run_in_threadpool(db.get, step.model, record_id, step.include)
                 elif step.op == "list":
-                    result = await run_in_threadpool(db.list, step.model, filters, step.limit,
-                                                     step.order_by, step.descending)
+                    result = await run_in_threadpool(db.list, step.model, filters, limit,
+                                                     step.order_by, step.descending, offset, step.include)
+                    if step.count_target:
+                        ctx[step.count_target] = await run_in_threadpool(db.count, step.model, filters)
                 elif step.op == "update":
                     result = await run_in_threadpool(db.update, step.model, record_id, values)
                 else:
                     result = await run_in_threadpool(db.delete, step.model, record_id)
+            except DatabaseError as e:
+                raise StepFailure(step.node_id, 409, {"error": str(e)})
             except Exception as e:  # ошибка БД — показываем, в каком блоке
                 raise StepFailure(step.node_id, 500, {"error": f"БД ({step.op} {step.model}): {type(e).__name__}: {e}"})
             ctx[step.target] = result

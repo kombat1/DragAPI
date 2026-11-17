@@ -60,7 +60,8 @@ chain(1, [
     ("create-in", "input", {"source": "json", "fields": [
         {"name": "item", "type": "str", "required": True},
         {"name": "price", "type": "float", "required": True},
-        {"name": "qty", "type": "int", "required": False, "default": 1}]}),
+        {"name": "qty", "type": "int", "required": False, "default": 1},
+        {"name": "customer_id", "type": "int", "required": False, "default": None}]}),
     ("create-check", "validate", {"rules": [
         {"field": "qty", "op": "min", "value": "1", "message": "Количество должно быть не меньше 1"},
         {"field": "price", "op": "min", "value": "0"},
@@ -69,23 +70,36 @@ chain(1, [
     ("create-db", "db", {"model": "orders", "op": "insert", "target": "order", "values": [
         {"field": "item", "expr": "item"}, {"field": "price", "expr": "price"},
         {"field": "qty", "expr": "qty"}, {"field": "total", "expr": "total"},
-        {"field": "status", "expr": "'new'"}]}),
+        {"field": "status", "expr": "'new'"}, {"field": "customer_id", "expr": "customer_id"}]}),
     ("create-out", "response", {"status": 201, "body": body(order="order")}),
 ])
 
 chain(2, [
-    ("list", "endpoint", {"method": "GET", "path": "/orders", "summary": "Список заказов"}),
+    ("list", "endpoint", {"method": "GET", "path": "/orders", "summary": "Список заказов: фильтры и страницы"}),
     ("list-in", "input", {"source": "query", "fields": [
-        {"name": "limit", "type": "int", "required": False, "default": 50}]}),
-    ("list-db", "db", {"model": "orders", "op": "list", "target": "orders", "filters": [],
-                       "limit": "100", "order_by": "id", "descending": True}),
-    ("list-out", "response", {"status": 200, "body": body(count="len(orders)", items="orders[:limit]")}),
+        {"name": "q", "type": "str", "required": False, "default": ""},
+        {"name": "status", "type": "str", "required": False, "default": ""},
+        {"name": "min_total", "type": "float", "required": False, "default": None},
+        {"name": "page", "type": "int", "required": False, "default": 1},
+        {"name": "per_page", "type": "int", "required": False, "default": 20}]}),
+    ("list-check", "validate", {"rules": [
+        {"field": "page", "op": "min", "value": "1"},
+        {"field": "per_page", "op": "min", "value": "1"}, {"field": "per_page", "op": "max", "value": "100"}]}),
+    ("list-db", "db", {"model": "orders", "op": "list", "target": "orders", "filters": [
+        {"field": "item", "op": "contains", "expr": "q"},
+        {"field": "status", "op": "eq", "expr": "status"},
+        {"field": "total", "op": "gte", "expr": "min_total"}],
+        "limit": "per_page", "offset_expr": "(page - 1) * per_page", "count_target": "total_count",
+        "order_by": "id", "descending": True, "include": ["customer_id"]}),
+    ("list-out", "response", {"status": 200, "body": body(
+        items="orders", total="total_count", page="page", pages="(total_count + per_page - 1) // per_page")}),
 ])
 
 last, col, y = chain(3, [
     ("get", "endpoint", {"method": "GET", "path": "/orders/{order_id}", "summary": "Заказ по id"}),
     ("get-in", *path_id),
-    ("get-db", "db", {"model": "orders", "op": "get", "target": "order", "id_expr": "order_id"}),
+    ("get-db", "db", {"model": "orders", "op": "get", "target": "order", "id_expr": "order_id",
+                      "include": ["customer_id"]}),
     ("get-if", "condition", {"expr": "order is None"}),
 ])
 branch(last, col, y,
@@ -133,6 +147,18 @@ chain(5, [
 ])
 
 chain(6, [
+    ("customer", "endpoint", {"method": "POST", "path": "/customers", "summary": "Создать клиента"}),
+    ("customer-in", "input", {"source": "json", "fields": [
+        {"name": "name", "type": "str", "required": True},
+        {"name": "email", "type": "str", "required": True}]}),
+    ("customer-check", "validate", {"rules": [
+        {"field": "email", "op": "regex", "value": r"[^@\s]+@[^@\s]+\.[a-zA-Z]{2,}", "message": "некорректный email"}]}),
+    ("customer-db", "db", {"model": "customers", "op": "insert", "target": "customer", "values": [
+        {"field": "name", "expr": "name"}, {"field": "email", "expr": "lower(email)"}]}),
+    ("customer-out", "response", {"status": 201, "body": body(customer="customer")}),
+])
+
+chain(7, [
     ("upload", "endpoint", {"method": "POST", "path": "/upload", "summary": "Загрузка файла"}),
     ("upload-in", "input", {"source": "form", "fields": [
         {"name": "file", "type": "file", "required": True},
@@ -144,10 +170,15 @@ chain(6, [
 project = {
     "id": "example-shop",
     "name": "Пример: магазин",
-    "models": [{"name": "orders", "fields": [
-        {"name": "item", "type": "str"}, {"name": "price", "type": "float"},
-        {"name": "qty", "type": "int"}, {"name": "total", "type": "float"},
-        {"name": "status", "type": "str"}]}],
+    "models": [
+        {"id": "m-customers", "name": "customers", "fields": [
+            {"id": "f-c-name", "name": "name", "type": "str"}, {"id": "f-c-email", "name": "email", "type": "str"}]},
+        {"id": "m-orders", "name": "orders", "fields": [
+            {"id": "f-o-item", "name": "item", "type": "str"}, {"id": "f-o-price", "name": "price", "type": "float"},
+            {"id": "f-o-qty", "name": "qty", "type": "int"}, {"id": "f-o-total", "name": "total", "type": "float"},
+            {"id": "f-o-status", "name": "status", "type": "str"},
+            {"id": "f-o-customer", "name": "customer_id", "type": "ref", "ref": "customers", "on_delete": "set_null"}]},
+    ],
     "env": [
         {"key": "SHOP_NAME", "value": "DragAPI Shop", "secret": False},
         {"key": "API_KEY", "value": "dev-secret", "secret": True},

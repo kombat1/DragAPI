@@ -49,5 +49,7 @@ export const api = {
   librariesRemove: (pid) => request('DELETE', `/api/projects/${pid}/libraries`),
   testRequest: (pid, body) => request('POST', `/api/projects/${pid}/test-request`, body),
   runTests: (pid, body) => request('POST', `/api/projects/${pid}/tests/run`, body),
+  schemaPlan: (pid, models) => request('POST', `/api/projects/${pid}/schema/plan`, { models }),
+  schemaDropExtra: (pid, models) => request('POST', `/api/projects/${pid}/schema/drop-extra`, { models }),
   exportUrl: (id) => `/api/projects/${id}/export`,
 }

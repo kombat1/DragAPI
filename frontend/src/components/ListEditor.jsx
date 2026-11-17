@@ -17,10 +17,14 @@ export default function ListEditor({ items, onChange, columns, empty, newItem, a
           {columns.map((col) => (
             <label key={col.key} style={{ flex: col.flex ?? 1 }} title={col.label}>
               {col.options ? (
-                <select value={item[col.key] ?? ''} onChange={(e) => update(i, col.key, e.target.value)}>
+                <select
+                  value={item[col.key] ?? ''}
+                  disabled={col.disabled?.(item)}
+                  onChange={(e) => update(i, col.key, e.target.value)}
+                >
                   {col.options.map((o) => (
                     <option key={o} value={o}>
-                      {o}
+                      {col.labels?.[o] ?? o}
                     </option>
                   ))}
                 </select>

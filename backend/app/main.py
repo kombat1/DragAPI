@@ -28,7 +28,7 @@ from .blocks import catalog
 from .graph import CompiledProject, GraphError, compile_project
 from .interpreter import build_app
 from .firewall import FirewallSettings
-from .runtime import Database, IngressFirewall
+from .runtime import Database, DatabaseError, IngressFirewall
 
 @asynccontextmanager
 async def lifespan(_app):
@@ -147,7 +147,7 @@ def _open_db(pid: str, compiled: CompiledProject) -> Database | None:
         return None
     try:
         return Database(storage.db_url(pid), [m.as_dict() for m in compiled.models])
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — миграция могла не пройти: показываем причину
         raise HTTPException(400, {"message": f"не удалось подготовить базу данных: {e}", "issues": []})
 
 
@@ -404,7 +404,43 @@ def run_project(pid: str):
         "docs_url": f"/run/{pid}/docs",
         "routes": [{"method": p.method, "path": p.path} for p in compiled.plans],
         "issues": [w.as_dict() for w in compiled.warnings],
+        "migrations": db.applied if db else [],
     }
+
+
+class SchemaIn(BaseModel):
+    models: list[dict] = []
+
+
+def _schema_db(pid: str, models: list[dict]) -> Database:
+    from .graph import _compile_models
+    errors = []
+    specs = _compile_models(models, lambda _n, m: errors.append(m))
+    if errors:
+        raise HTTPException(400, {"message": "; ".join(errors), "issues": []})
+    return Database(storage.db_url(pid), [m.as_dict() for m in specs], apply_migrations=False)
+
+
+@app.post("/api/projects/{pid}/schema/plan")
+def schema_plan(pid: str, body: SchemaIn):
+    """Что изменится в превью-БД при следующем запуске (ничего не меняет)."""
+    _load(pid)
+    db = _schema_db(pid, body.models)
+    try:
+        return {"ops": db.plan()}
+    finally:
+        db.dispose()
+
+
+@app.post("/api/projects/{pid}/schema/drop-extra")
+def schema_drop_extra(pid: str, body: SchemaIn):
+    """Удалить колонки, которых больше нет в моделях (данные в них теряются)."""
+    _load(pid)
+    db = _schema_db(pid, body.models)
+    try:
+        return {"applied": db.migrate(drop_extra=True)}
+    finally:
+        db.dispose()
 
 
 class _Preview:
@@ -454,8 +490,7 @@ async def tests_run(pid: str, body: TestsRunIn):
     results = []
     try:
         if body.reset_data and preview.db is not None:
-            for name in preview.db.tables:
-                preview.db.clear(name)
+            preview.db.clear_all()
         for t in tests:
             started = time.perf_counter()
             try:
@@ -520,7 +555,10 @@ def data_clear(pid: str, model: str):
     db = _data_db(pid)
     if model not in db.tables:
         raise HTTPException(404, "модель не найдена")
-    db.clear(model)
+    try:
+        db.clear(model)
+    except DatabaseError as e:
+        raise HTTPException(409, str(e)) from None
     return {"ok": True}
 
 

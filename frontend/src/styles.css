@@ -307,3 +307,11 @@ b.yes { color: var(--ok); } b.no { color: var(--danger); }
 .problems { color: var(--danger); font-size: 12px; padding: 2px 0 2px 20px; }
 .test-edit { display: flex; flex-direction: column; gap: 3px; padding: 6px 0 2px 20px; }
 @media (max-width: 1100px) { .tests-panel { grid-template-columns: 1fr; } }
+
+/* --- шаг 3: схема и связи --- */
+.schema-plan { margin-top: 14px; padding: 8px 10px; border: 1px dashed var(--border); border-radius: 8px; display: flex; flex-direction: column; gap: 3px; align-items: flex-start; }
+.plan-op { font-size: 12px; }
+.plan-op.warn { color: var(--warn); }
+.plan-op.muted { color: var(--muted); }
+.plan-icon { display: inline-block; width: 16px; font-weight: 700; }
+.checks { display: flex; flex-direction: column; gap: 3px; }

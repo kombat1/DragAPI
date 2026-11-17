@@ -1,5 +1,7 @@
 import { Handle, NodeToolbar, Position } from '@xyflow/react'
 import { StepDetails } from './TestsPanel.jsx'
+
+const OPS = { eq: '=', ne: '≠', gt: '>', gte: '≥', lt: '<', lte: '≤', contains: '∋', startswith: '^', in: '∈', is_null: '∅' }
 import { useCatalog } from '../catalog.js'
 
 function Summary({ type, data }) {
@@ -69,6 +71,13 @@ function Summary({ type, data }) {
                 <code>{v.field}</code> = <code className="expr">{v.expr}</code>
               </div>
             ))}
+          {data.op === 'list' &&
+            (data.filters || []).slice(0, 3).map((f, i) => (
+              <div key={i} className="row-line">
+                <code>{f.field}</code> {OPS[f.op] || '='} <code className="expr">{f.expr}</code>
+              </div>
+            ))}
+          {(data.include || []).length > 0 && <div className="muted">+ {data.include.join(', ')}</div>}
           {(data.values || []).length > 4 && (data.op === 'insert' || data.op === 'update') && (
             <div className="muted">ещё {data.values.length - 4}…</div>
           )}
