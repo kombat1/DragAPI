@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import TestsPanel from './TestsPanel.jsx'
 import { api } from '../api.js'
 import { NetworkEvents } from './Inspector.jsx'
 
@@ -215,14 +216,54 @@ function Versions({ projectId, onRestored }) {
   )
 }
 
-export default function BottomPanel({ projectId, running, issues, onSelectNode, onHighlight, onRestored, models }) {
-  const [tab, setTab] = useState('issues')
+const HEIGHT_KEY = 'dragapi.bottomHeight'
+function loadHeight() {
+  try {
+    return Number(localStorage.getItem(HEIGHT_KEY)) || 300
+  } catch {
+    return 300
+  }
+}
+
+export default function BottomPanel({
+  projectId, running, issues, onSelectNode, onHighlight, onRestored, models,
+  tab, setTab, testsProps,
+}) {
   const [collapsed, setCollapsed] = useState(false)
+  const [height, setHeight] = useState(loadHeight)
+  const drag = useRef(null)
   const errors = issues.filter((i) => i.level === 'error').length
+
+  // высота панели перетаскиванием верхней границы
+  const startResize = (e) => {
+    e.preventDefault()
+    drag.current = { y: e.clientY, h: height }
+    const move = (ev) => {
+      const h = Math.min(Math.max(drag.current.h + drag.current.y - ev.clientY, 120), window.innerHeight - 200)
+      setHeight(h)
+    }
+    const up = () => {
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', up)
+      setHeight((h) => {
+        try {
+          localStorage.setItem(HEIGHT_KEY, String(h))
+        } catch {
+          /* не запомнится — не страшно */
+        }
+        return h
+      })
+    }
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', up)
+  }
+
   return (
-    <section className={`bottom-panel ${collapsed ? 'collapsed' : ''}`}>
+    <section className={`bottom-panel ${collapsed ? 'collapsed' : ''}`} style={collapsed ? undefined : { height }}>
+      {!collapsed && <div className="resize-handle" onPointerDown={startResize} title="Потяните, чтобы изменить высоту" />}
       <div className="tabs">
         {[
+          ['tests', `Тесты${testsProps.tests.length ? ` (${testsProps.tests.length})` : ''}`],
           ['issues', `Проблемы${issues.length ? ` (${issues.length})` : ''}`],
           ['logs', `Логи${running ? ' ●' : ''}`],
           ['data', `Данные${models?.length ? ` (${models.length})` : ''}`],
@@ -243,6 +284,7 @@ export default function BottomPanel({ projectId, running, issues, onSelectNode, 
       </div>
       {!collapsed && (
         <div className="tab-body">
+          {tab === 'tests' && <TestsPanel projectId={projectId} {...testsProps} />}
           {tab === 'issues' &&
             (issues.length ? (
               issues.map((i, k) => (

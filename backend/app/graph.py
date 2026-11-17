@@ -228,6 +228,7 @@ class CompiledProject:
     packages: list[str] = field(default_factory=list)
     only_binary: bool = True
     firewall: FirewallSettings = field(default_factory=FirewallSettings)
+    tests: list[dict] = field(default_factory=list)
 
     @property
     def env_values(self) -> dict[str, str]:
@@ -436,12 +437,19 @@ def compile_project(graph: dict) -> CompiledProject:
     ]
     if not any(n.get("type") == "endpoint" for n in nodes.values()):
         warnings.append(Issue(None, "в проекте нет ни одного HTTP-эндпоинта", "warning"))
+    endpoint_ids = {p.node_id for p in plans}
+    tests = [t for t in (graph.get("tests") or []) if isinstance(t, dict)]
+    for t in tests:
+        if t.get("endpoint") not in endpoint_ids:
+            warnings.append(Issue(None, f"тест «{t.get('name') or t.get('id')}» ссылается на удалённый или "
+                                        f"неработающий эндпоинт — он будет пропущен", "warning"))
     used_models = {s.model for p in plans for s in iter_steps(p.chain) if isinstance(s, DbStep)}
     for m in models:
         if m.name not in used_models:
             warnings.append(Issue(None, f"модель «{m.name}» не используется ни одним блоком БД", "warning"))
     return CompiledProject(str(graph.get("name") or ""), plans, models, env, warnings,
-                           sandbox_settings, packages, bool(libraries.get("only_binary", True)), firewall)
+                           sandbox_settings, packages, bool(libraries.get("only_binary", True)), firewall,
+                           [t for t in tests if t.get("endpoint") in endpoint_ids])
 
 
 def compile_graph(graph: dict) -> tuple[list[EndpointPlan], list[Issue]]:

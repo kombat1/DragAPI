@@ -21,7 +21,7 @@ from pydantic import BaseModel
 from starlette.responses import JSONResponse
 from starlette.routing import Mount, Router
 
-from . import codegen, sandbox, storage
+from . import codegen, sandbox, storage, testing
 from .pyenv import envs, validate_packages
 from .blocks import catalog
 from .graph import CompiledProject, GraphError, compile_project
@@ -98,7 +98,20 @@ class GraphIn(BaseModel):
     sandbox: dict = {}
     libraries: dict = {}
     firewall: dict = {}
+    tests: list[dict] = []
     viewport: dict | None = None
+
+
+class TestRequestIn(BaseModel):
+    graph: GraphIn
+    endpoint: str          # id блока эндпоинта
+    request: dict = {}     # {path, query, headers, body_type, body, form}
+
+
+class TestsRunIn(BaseModel):
+    graph: GraphIn
+    tests: list[dict] | None = None   # по умолчанию — все тесты из графа
+    reset_data: bool = False          # очистить превью-БД перед прогоном
 
 
 class CreateIn(BaseModel):
@@ -368,6 +381,70 @@ def run_project(pid: str):
     }
 
 
+class _Preview:
+    """Приложение из текущего (возможно, несохранённого) графа — для тестовых запросов из редактора."""
+
+    def __init__(self, pid: str, graph: GraphIn):
+        self.pid = pid
+        self.compiled = _compile(graph.model_dump())
+        self.db = _open_db(pid, self.compiled)
+        self.log: deque = deque(maxlen=1)
+        self.app = build_app(self.compiled, self.db, self.log, lambda: envs.venv(pid),
+                             on_network=lambda events: [runner.fw_event(pid, {**e, "source": "тестовый запрос"})
+                                                        for e in events])
+        self.plans = {p.node_id: p for p in self.compiled.plans}
+
+    def close(self):
+        if self.db is not None:
+            self.db.dispose()
+
+    async def send(self, endpoint: str, request: dict) -> dict:
+        plan = self.plans.get(endpoint)
+        if plan is None:
+            raise HTTPException(400, {"message": "эндпоинт не найден или его цепочка содержит ошибки", "issues": []})
+        try:
+            return await testing.send(self.app, plan, request, self.compiled.env_values, self.log)
+        except testing.TemplateError as e:
+            raise HTTPException(400, {"message": str(e), "issues": []}) from None
+
+
+@app.post("/api/projects/{pid}/test-request")
+async def test_request(pid: str, body: TestRequestIn):
+    """«Отправить» в панели «Тесты»: запрос к текущему графу без сохранения и запуска."""
+    _load(pid)
+    preview = _Preview(pid, body.graph)
+    try:
+        return await preview.send(body.endpoint, body.request)
+    finally:
+        preview.close()
+
+
+@app.post("/api/projects/{pid}/tests/run")
+async def tests_run(pid: str, body: TestsRunIn):
+    """«Прогнать все»: тест-кейсы по порядку (они могут зависеть друг от друга через данные)."""
+    _load(pid)
+    preview = _Preview(pid, body.graph)
+    tests = body.tests if body.tests is not None else body.graph.tests
+    results = []
+    try:
+        if body.reset_data and preview.db is not None:
+            for name in preview.db.tables:
+                preview.db.clear(name)
+        for t in tests:
+            started = time.perf_counter()
+            try:
+                result = await preview.send(t.get("endpoint", ""), t.get("request") or {})
+                problems = testing.check_expectation(result, t.get("expect") or {})
+            except HTTPException as e:
+                result, problems = None, [e.detail["message"] if isinstance(e.detail, dict) else str(e.detail)]
+            results.append({"id": t.get("id"), "name": t.get("name"), "passed": not problems,
+                            "problems": problems, "result": result,
+                            "ms": round((time.perf_counter() - started) * 1000, 1)})
+    finally:
+        preview.close()
+    return {"passed": sum(r["passed"] for r in results), "total": len(results), "results": results}
+
+
 @app.post("/api/projects/{pid}/stop")
 def stop_project(pid: str):
     runner.unmount(pid)
@@ -430,7 +507,7 @@ def export_project(pid: str, format: str = "zip"):
         return Response(files["main.py"], media_type="text/x-python; charset=utf-8")
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
-        for path, content in files.items():
+        for path, content in files.items():  # main.py, blocks/, tests/, …
             z.writestr(f"{pid}/{path}", content)
         z.writestr(f"{pid}/README.md", f"# {project.get('name', pid)}\n\nСгенерировано DragAPI.\n\n"
                                        "```bash\npip install -r requirements.txt\n"

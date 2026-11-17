@@ -633,3 +633,95 @@ def test_ingress_trust_proxy():
     assert trusted.get("/", headers={"X-Forwarded-For": "203.0.113.5, 10.0.0.1"}).status_code == 200
     untrusted = TestClient(_as_client(IngressFirewall(ok, rules, "deny", trust_proxy=False), "127.0.0.1"))
     assert untrusted.get("/", headers={"X-Forwarded-For": "203.0.113.5"}).status_code == 403
+
+
+# --- шаг 1: тестовые запросы, тест-кейсы, экспорт тестов ---
+
+def _platform(tmp_path, monkeypatch):
+    monkeypatch.setattr(storage, "DATA_DIR", tmp_path / "projects")
+    monkeypatch.setattr(storage, "DB_DIR", tmp_path / "db")
+    c = TestClient(platform_app)
+    pid = c.post("/api/projects", json={"name": "T"}).json()["id"]
+    return c, pid
+
+
+def _graph_body(g=None):
+    g = g or EXAMPLE
+    return {k: g[k] for k in ("name", "nodes", "edges", "models", "env") if k in g} | {"tests": g.get("tests", [])}
+
+
+def test_test_request_unsaved_graph(tmp_path, monkeypatch):
+    c, pid = _platform(tmp_path, monkeypatch)
+    graph = _graph_body()
+    r = c.post(f"/api/projects/{pid}/test-request", json={
+        "graph": graph, "endpoint": "create",
+        "request": {"body_type": "json", "body": '{"item": "pen", "price": 2.5, "qty": 2}'}}).json()
+    assert r["status"] == 201 and r["body"]["order"]["total"] == 5.0
+    assert [s["kind"] for s in r["trace"]] == ["input", "validate", "logic", "db", "response"]
+    assert r["trace"][2]["ctx"]["total"] == 5.0
+
+    # секрет через шаблон, ветвление в трассе
+    r = c.post(f"/api/projects/{pid}/test-request", json={
+        "graph": graph, "endpoint": "delete",
+        "request": {"path": {"order_id": "1"}, "headers": {"X-API-Key": "{{env.API_KEY}}"}}}).json()
+    assert r["status"] == 200 and r["url"] == "/orders/1"
+    assert [s["kind"] for s in r["trace"]][-2:] == ["condition", "response"]
+
+    # отклонено FastAPI до первого блока
+    r = c.post(f"/api/projects/{pid}/test-request", json={
+        "graph": graph, "endpoint": "create", "request": {"body_type": "json", "body": '{"item": 1}'}}).json()
+    assert r["status"] == 422 and r["rejected_before_chain"]
+
+    bad = c.post(f"/api/projects/{pid}/test-request", json={
+        "graph": graph, "endpoint": "delete", "request": {"path": {"order_id": "1"}, "headers": {"X": "{{env.NOPE}}"}}})
+    assert bad.status_code == 400 and "NOPE" in bad.json()["detail"]["message"]
+
+
+TESTS = [
+    {"id": "a", "name": "создать заказ", "endpoint": "create",
+     "request": {"body_type": "json", "body": '{"item": "pen", "price": 3, "qty": 2}'},
+     "expect": {"status": 201, "body": '{"order": {"id": 1, "total": 6.0}}'}},
+    {"id": "b", "name": "получить заказ", "endpoint": "get", "request": {"path": {"order_id": "1"}},
+     "expect": {"status": 200, "body": '{"order": {"item": "pen"}}'}},
+    {"id": "c", "name": "удалить без ключа", "endpoint": "delete", "request": {"path": {"order_id": "1"}},
+     "expect": {"status": 401}},
+    {"id": "d", "name": "удалить с ключом", "endpoint": "delete",
+     "request": {"path": {"order_id": "1"}, "headers": {"X-API-Key": "{{env.API_KEY}}"}},
+     "expect": {"status": 200, "body": '{"deleted": 1}'}},
+]
+
+
+def test_tests_run(tmp_path, monkeypatch):
+    c, pid = _platform(tmp_path, monkeypatch)
+    graph = _graph_body() | {"tests": TESTS}
+    r = c.post(f"/api/projects/{pid}/tests/run", json={"graph": graph, "reset_data": True}).json()
+    assert (r["passed"], r["total"]) == (4, 4), r
+    # повторный прогон со сбросом: счётчик id тоже сброшен
+    r = c.post(f"/api/projects/{pid}/tests/run", json={"graph": graph, "reset_data": True}).json()
+    assert (r["passed"], r["total"]) == (4, 4), r
+    # без сброса id уже другой (и удалённые id не переиспользуются) — понятное расхождение
+    r = c.post(f"/api/projects/{pid}/tests/run", json={"graph": graph, "tests": TESTS[:1]}).json()
+    assert r["passed"] == 0 and r["results"][0]["problems"] == ["$.order.id: ожидалось 1, получено 2"]
+
+
+def test_match_subset():
+    from app.testing import match_subset
+    assert match_subset({"a": {"b": 1}}, {"a": {"b": 1, "c": 2}, "x": 0}) == []
+    assert match_subset({"a": [1, 2]}, {"a": [1]}) == ["$.a: ожидался список из 2 элементов, получено 1 элементов"]
+    assert match_subset({"a": 1}, {}) == ["$.a: нет в ответе"]
+
+
+def test_exported_tests_run_with_pytest(tmp_path):
+    import subprocess
+
+    g = copy.deepcopy(EXAMPLE) | {"tests": TESTS}
+    root = tmp_path / "export"
+    for path, content in codegen.generate_files(compile_project(g)).items():
+        (root / path).parent.mkdir(parents=True, exist_ok=True)
+        (root / path).write_text(content, "utf-8")
+    env = {"PATH": "/usr/bin:/bin", "API_KEY": "dev-secret", "HOME": str(tmp_path)}
+    proc = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "tests"],
+                          cwd=root, env=env, capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, proc.stdout[-2000:] + proc.stderr[-2000:]
+    assert "4 passed" in proc.stdout
+    assert "dev-secret" not in (root / "tests" / "test_api.py").read_text()

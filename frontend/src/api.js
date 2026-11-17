@@ -47,5 +47,7 @@ export const api = {
   librariesStatus: (pid, body) => request('POST', `/api/projects/${pid}/libraries/status`, body),
   librariesInstall: (pid, body) => request('POST', `/api/projects/${pid}/libraries/install`, body),
   librariesRemove: (pid) => request('DELETE', `/api/projects/${pid}/libraries`),
+  testRequest: (pid, body) => request('POST', `/api/projects/${pid}/test-request`, body),
+  runTests: (pid, body) => request('POST', `/api/projects/${pid}/tests/run`, body),
   exportUrl: (id) => `/api/projects/${id}/export`,
 }

@@ -83,6 +83,10 @@ function Editor({ catalog, projectId, onProjectsChanged }) {
   const [sandbox, setSandbox] = useState({})
   const [libraries, setLibraries] = useState({ packages: [], only_binary: true })
   const [firewall, setFirewall] = useState(DEFAULT_FIREWALL)
+  const [tests, setTests] = useState([])
+  const [bottomTab, setBottomTab] = useState('tests')
+  const [focusEndpoint, setFocusEndpoint] = useState(null)
+  const [debug, setDebug] = useState(null) // {steps, current} — подсветка трассы тестового запроса
   const [settingsOpen, setSettingsOpen] = useState(null) // null | имя вкладки настроек проекта
   const [sandboxInfo, setSandboxInfo] = useState(null)
   const [validateNonce, setValidateNonce] = useState(0) // перепроверить граф (например, после установки библиотек)
@@ -98,7 +102,7 @@ function Editor({ catalog, projectId, onProjectsChanged }) {
   const [toast, setToast] = useState(null)
   const [activeNodes, setActiveNodes] = useState([])
   const [loaded, setLoaded] = useState(false)
-  const { screenToFlowPosition, fitView } = useReactFlow()
+  const { screenToFlowPosition, fitView, setCenter, getNode, getZoom } = useReactFlow()
   const wrapper = useRef(null)
 
   const toastTimer = useRef(null)
@@ -122,6 +126,8 @@ function Editor({ catalog, projectId, onProjectsChanged }) {
       setSandbox(p.sandbox || {})
       setLibraries({ packages: [], only_binary: true, ...(p.libraries || {}) })
       setFirewall(normalizeFirewall(p.firewall, p.sandbox?.network))
+      setTests(p.tests || [])
+      setDebug(null)
       setSelectedId(null)
       setDirty(false)
       setRunning(p.running ? { base_url: `/run/${projectId}`, docs_url: `/run/${projectId}/docs` } : null)
@@ -133,16 +139,23 @@ function Editor({ catalog, projectId, onProjectsChanged }) {
     }
   }, [projectId, fitView])
 
+  const lastRoutes = useRef([])
   const graph = useMemo(
-    () => ({ name, nodes, edges, models, env, sandbox, libraries, firewall }),
-    [name, nodes, edges, models, env, sandbox, libraries, firewall],
+    () => ({ name, nodes, edges, models, env, sandbox, libraries, firewall, tests }),
+    [name, nodes, edges, models, env, sandbox, libraries, firewall, tests],
   )
 
   // живая проверка графа на бэкенде
   useEffect(() => {
     if (!loaded) return
     const t = setTimeout(() => {
-      api.validate(graph, projectId).then(setValidation).catch(() => {})
+      api
+        .validate(graph, projectId)
+        .then((v) => {
+          if (v.routes) lastRoutes.current = v.routes
+          setValidation(v)
+        })
+        .catch(() => {})
     }, 300)
     return () => clearTimeout(t)
   }, [graph, loaded, projectId, validateNonce])
@@ -272,31 +285,51 @@ function Editor({ catalog, projectId, onProjectsChanged }) {
   }, [validation])
 
   // Ноды для отображения: добавляем проблемы и подсветку из логов, не трогая сохраняемые данные.
+  // трасса тестового запроса: пройденные блоки и текущий шаг
+  const debugVisited = useMemo(() => new Set((debug?.steps || []).slice(0, (debug?.current ?? -1) + 1).map((s) => s.node_id)), [debug])
+  const debugStep = debug ? debug.steps[debug.current] : null
+
+  // канвас следует за текущим шагом трассы (карточка шага — над блоком, поэтому центр чуть выше)
+  useEffect(() => {
+    const node = debugStep && getNode(debugStep.node_id)
+    if (!node) return
+    const w = node.measured?.width ?? 230
+    const h = node.measured?.height ?? 80
+    setCenter(node.position.x + w / 2, node.position.y + h / 2 - 40, { zoom: Math.max(getZoom(), 0.9), duration: 300 })
+  }, [debugStep, getNode, setCenter, getZoom])
+
   const viewNodes = useMemo(
     () =>
       nodes.map((n) => ({
         ...n,
         selected: n.id === selectedId,
-        data: { ...n.data, __issues: issuesByNode[n.id], __active: activeNodes.includes(n.id) },
+        data: {
+          ...n.data,
+          __issues: issuesByNode[n.id],
+          __active: activeNodes.includes(n.id) || debugVisited.has(n.id),
+          __step: debugStep && debugStep.node_id === n.id ? debugStep : null,
+        },
       })),
-    [nodes, selectedId, issuesByNode, activeNodes],
+    [nodes, selectedId, issuesByNode, activeNodes, debugVisited, debugStep],
   )
 
   // подписи «да»/«нет» на связях из условия
-  const viewEdges = useMemo(
-    () =>
-      edges.map((e) =>
-        e.sourceHandle === 'true' || e.sourceHandle === 'false'
-          ? {
-              ...e,
-              label: e.sourceHandle === 'true' ? 'да' : 'нет',
-              className: `branch-${e.sourceHandle}`,
-              labelBgPadding: [4, 2],
-            }
-          : e,
-      ),
-    [edges],
-  )
+  const viewEdges = useMemo(() => {
+    // связи, по которым прошёл тестовый запрос (до текущего шага)
+    const passed = new Set()
+    const ids = (debug?.steps || []).slice(0, (debug?.current ?? -1) + 1).map((s) => s.node_id)
+    for (let i = 1; i < ids.length; i++) passed.add(`${ids[i - 1]}>${ids[i]}`)
+    return edges.map((e) => {
+      const branch = e.sourceHandle === 'true' || e.sourceHandle === 'false'
+      const onPath = passed.has(`${e.source}>${e.target}`)
+      return {
+        ...e,
+        animated: onPath,
+        className: [branch ? `branch-${e.sourceHandle}` : '', onPath ? 'on-path' : ''].join(' '),
+        ...(branch ? { label: e.sourceHandle === 'true' ? 'да' : 'нет', labelBgPadding: [4, 2] } : {}),
+      }
+    })
+  }, [edges, debug])
 
   const nodeTypes = useMemo(
     () => Object.fromEntries(Object.keys(catalog.blocks).map((t) => [t, BlockNode])),
@@ -384,6 +417,11 @@ function Editor({ catalog, projectId, onProjectsChanged }) {
           projectId={projectId}
           sandboxInfo={sandboxInfo}
           onOpenSettings={(tab) => setSettingsOpen(tab || 'models')}
+          onTestEndpoint={(id) => {
+            setFocusEndpoint(null)
+            setTimeout(() => setFocusEndpoint(id))
+            setBottomTab('tests')
+          }}
           onChange={(data) => updateNodeData(selected.id, data)}
           onDelete={() => deleteNode(selected.id)}
         />
@@ -397,6 +435,19 @@ function Editor({ catalog, projectId, onProjectsChanged }) {
         onHighlight={setActiveNodes}
         onRestored={() => onProjectsChanged(true)}
         models={models}
+        tab={bottomTab}
+        setTab={setBottomTab}
+        testsProps={{
+          graph,
+          routes: validation.routes || lastRoutes.current,
+          focusEndpoint,
+          tests,
+          setTests: (t) => {
+            setTests(t)
+            markDirty()
+          },
+          onDebug: setDebug,
+        }}
       />
       {settingsOpen && (
         <ProjectSettings

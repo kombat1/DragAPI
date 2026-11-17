@@ -268,7 +268,7 @@ const AUTH_SCHEMES = {
   bearer: 'Bearer-токен (Authorization)',
 }
 
-export default function Inspector({ node, onChange, onDelete, issues, availableFields, models, env, sandbox, firewall, projectId, onOpenSettings, sandboxInfo }) {
+export default function Inspector({ node, onChange, onDelete, issues, availableFields, models, env, sandbox, firewall, projectId, onOpenSettings, onTestEndpoint, sandboxInfo }) {
   const [errorLine, setErrorLine] = useState(null)
   const [editorMode, setEditorModeState] = useState(loadEditorMode) // null | 'half' | 'full'
   const setEditorMode = (mode) => {
@@ -338,6 +338,9 @@ export default function Inspector({ node, onChange, onDelete, issues, availableF
           <Field label="Описание (для Swagger)">
             <input value={d.summary || ''} onChange={(e) => set({ summary: e.target.value })} />
           </Field>
+          <button className="primary" onClick={() => onTestEndpoint(node.id)} title="Открыть во вкладке «Тесты» с подготовленным запросом">
+            ▶ Тестовый запрос
+          </button>
         </>
       )}
 

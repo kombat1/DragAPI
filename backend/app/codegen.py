@@ -268,6 +268,88 @@ def env_example(project: CompiledProject) -> str:
     return "\n".join(lines) + "\n"
 
 
+def generate_tests(project: CompiledProject) -> str:
+    """tests/test_api.py: тест-кейсы проекта для pytest (та же логика сравнения, что в редакторе)."""
+    import json as _json
+
+    from . import testing
+
+    plans = {p.node_id: p for p in project.plans}
+    cases = []
+    for t in project.tests:
+        plan = plans[t["endpoint"]]
+        cases.append({"name": t.get("name") or t.get("id"), "method": plan.method, "path": plan.path,
+                      "request": t.get("request") or {}, "expect": t.get("expect") or {}})
+    cases_src = _json.dumps(cases, ensure_ascii=False, indent=4)
+    return f'''"""Автотесты, сохранённые в DragAPI. Запуск из корня проекта: pytest
+
+Тесты идут по порядку и делят одну временную базу (могут зависеть друг от друга).
+Значения вида {{{{env.KEY}}}} берутся из переменных окружения — задайте секреты так же, как для main.py.
+"""
+
+import json
+import os
+import re
+import tempfile
+from urllib.parse import quote
+
+import pytest
+
+os.environ.setdefault("DATABASE_URL", "sqlite:///" + os.path.join(tempfile.mkdtemp(), "test.db"))
+
+from fastapi.testclient import TestClient  # noqa: E402
+
+import main  # noqa: E402
+
+TEMPLATE_RE = re.compile(r"\\{{\\{{\\s*env\\.([A-Za-z_][A-Za-z0-9_]*)\\s*\\}}\\}}")
+
+
+class TemplateError(ValueError):
+    pass
+
+
+{inspect.getsource(testing.render_templates).strip()}
+
+
+{inspect.getsource(testing.match_subset).strip()}
+
+
+CASES = {cases_src}
+
+
+async def _local(scope, receive, send):
+    # запросы идут как будто с 127.0.0.1 — для входящего firewall проекта
+    await main.app({{**scope, "client": ("127.0.0.1", 50000)}}, receive, send)
+
+
+@pytest.fixture(scope="module")
+def client():
+    return TestClient(_local)
+
+
+@pytest.mark.parametrize("case", CASES, ids=[c["name"] for c in CASES])
+def test_case(client, case):
+    request = render_templates(case["request"], dict(os.environ))
+    path_params = request.get("path") or {{}}
+    url = re.sub(r"{{([A-Za-z_][A-Za-z0-9_]*)}}", lambda m: quote(str(path_params[m.group(1)]), safe=""), case["path"])
+    kwargs = {{"params": request.get("query") or {{}}, "headers": request.get("headers") or {{}}}}
+    if request.get("body_type") == "json" and str(request.get("body") or "").strip():
+        kwargs["json"] = json.loads(request["body"]) if isinstance(request["body"], str) else request["body"]
+    elif request.get("body_type") == "form":
+        kwargs["data"] = request.get("form") or {{}}
+    response = client.request(case["method"], url, **kwargs)
+    expect = case["expect"]
+    if str(expect.get("status") or "").strip():
+        assert response.status_code == int(expect["status"]), response.text
+    body = expect.get("body")
+    if isinstance(body, str):
+        body = json.loads(body) if body.strip() else None
+    if body is not None:
+        problems = match_subset(body, response.json())
+        assert not problems, "\\n".join(problems)
+'''
+
+
 def generate_files(project: CompiledProject) -> dict[str, str]:
     """Все файлы экспортируемого проекта: путь -> содержимое."""
     files = {
@@ -275,6 +357,11 @@ def generate_files(project: CompiledProject) -> dict[str, str]:
         "requirements.txt": requirements(project),
         ".env.example": env_example(project),
     }
+    if project.tests:
+        files["tests/test_api.py"] = generate_tests(project)
+        files["tests/conftest.py"] = ("import os\nimport sys\n\n"
+                                      "sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))\n")
+        files["requirements-dev.txt"] = "-r requirements.txt\npytest>=8\nhttpx>=0.27\n"
     blocks = code_steps(project)
     if blocks:
         files["blocks/__init__.py"] = ""

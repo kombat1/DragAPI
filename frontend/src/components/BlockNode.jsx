@@ -1,4 +1,5 @@
-import { Handle, Position } from '@xyflow/react'
+import { Handle, NodeToolbar, Position } from '@xyflow/react'
+import { StepDetails } from './TestsPanel.jsx'
 import { useCatalog } from '../catalog.js'
 
 function Summary({ type, data }) {
@@ -116,7 +117,7 @@ function Summary({ type, data }) {
   }
 }
 
-export default function BlockNode({ type, data, selected }) {
+export default function BlockNode({ id, type, data, selected }) {
   const catalog = useCatalog()
   const spec = catalog?.blocks[type]
   if (!spec) return null
@@ -124,10 +125,15 @@ export default function BlockNode({ type, data, selected }) {
   const level = issues.some((i) => i.level === 'error') ? 'error' : issues.length ? 'warning' : ''
   return (
     <div
-      className={`block ${selected ? 'selected' : ''} ${level} ${data.__active ? 'active' : ''}`}
+      className={`block ${selected ? 'selected' : ''} ${level} ${data.__active ? 'active' : ''} ${data.__step ? 'current-step' : ''}`}
       style={{ '--accent': spec.color }}
       title={issues.map((i) => i.message).join('\n')}
     >
+      {data.__step && (
+        <NodeToolbar isVisible position={Position.Top} className="step-toolbar">
+          <StepDetails step={data.__step} catalog={catalog} nodes={[{ id, type }]} compact />
+        </NodeToolbar>
+      )}
       {spec.inputs.length > 0 && (
         <Handle type="target" position={Position.Left} title={`вход: ${spec.inputs.join(' | ')}`} />
       )}

@@ -263,3 +263,47 @@ button.linklike { border: none; background: none; padding: 0 4px; color: var(--p
 .fw-reason { color: var(--muted); }
 .net-events { margin: 4px 0; }
 .toggle.static { cursor: default; }
+
+/* --- шаг 1: тесты и пошаговая трасса --- */
+.bottom-panel { position: relative; }
+.resize-handle { position: absolute; top: -4px; left: 0; right: 0; height: 8px; cursor: ns-resize; z-index: 5; }
+.resize-handle:hover { background: color-mix(in srgb, var(--primary) 30%, transparent); }
+.tests-panel { display: grid; grid-template-columns: minmax(280px, 1fr) minmax(320px, 1.3fr) minmax(280px, 1fr); gap: 12px; height: 100%; min-height: 0; }
+.tests-panel > div { overflow-y: auto; min-height: 0; padding-right: 4px; }
+.tp-row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.tp-request .field-label { margin-top: 8px; }
+.tp-request select { max-width: 100%; flex: 1; }
+.tp-body-head { display: flex; gap: 8px; align-items: center; }
+.kv { display: flex; flex-direction: column; gap: 3px; align-items: flex-start; }
+.kv-row { display: flex; gap: 4px; width: 100%; }
+.kv-row input { flex: 1; min-width: 0; padding: 3px 6px; }
+.result-head { display: flex; gap: 8px; align-items: baseline; }
+.result-body { max-height: 140px; overflow: auto; background: var(--code-bg); padding: 6px; border-radius: 6px; font-size: 11.5px; }
+.stepper { display: flex; gap: 8px; align-items: center; margin: 6px 0; flex-wrap: wrap; }
+.step-dots { display: flex; gap: 3px; flex-wrap: wrap; }
+.step-dot { width: 12px; height: 12px; border-radius: 50%; padding: 0; border: 1px solid var(--muted); background: var(--panel); }
+.step-dot.current { background: var(--primary); border-color: var(--primary); }
+.step-dot.err { border-color: var(--danger); }
+.step-details { border-left: 3px solid var(--primary); padding: 4px 8px; font-size: 12px; }
+.step-details.compact { border: none; padding: 0; max-width: 300px; }
+.step-diff { display: flex; flex-direction: column; gap: 1px; margin-top: 3px; }
+.step-diff .added { color: var(--ok); font-weight: 700; }
+.step-diff .changed { color: var(--warn); font-weight: 700; }
+.step-error { color: var(--danger); }
+b.yes { color: var(--ok); } b.no { color: var(--danger); }
+.step-toolbar { background: var(--panel); border: 1px solid var(--primary); border-radius: 8px; padding: 6px 8px; box-shadow: 0 4px 16px rgba(0,0,0,.18); color: var(--text); font-size: 11px; }
+.block.current-step { box-shadow: 0 0 0 3px var(--primary) !important; }
+.react-flow__edge.on-path .react-flow__edge-path { stroke: var(--primary); stroke-width: 3; }
+.run-summary { padding: 4px 8px; border-radius: 6px; margin: 6px 0; font-weight: 600; }
+.run-summary.ok { color: var(--ok); background: color-mix(in srgb, var(--ok) 10%, transparent); }
+.run-summary.bad { color: var(--danger); background: color-mix(in srgb, var(--danger) 10%, transparent); }
+.test-item { border: 1px solid var(--border); border-radius: 6px; padding: 4px 6px; margin-top: 4px; }
+.test-item.ok { border-left: 3px solid var(--ok); }
+.test-item.bad { border-left: 3px solid var(--danger); }
+.test-item .mark { width: 14px; font-weight: 700; }
+.test-item.ok .mark { color: var(--ok); } .test-item.bad .mark { color: var(--danger); }
+.test-name { cursor: pointer; font-weight: 600; }
+.test-name:hover { text-decoration: underline; }
+.problems { color: var(--danger); font-size: 12px; padding: 2px 0 2px 20px; }
+.test-edit { display: flex; flex-direction: column; gap: 3px; padding: 6px 0 2px 20px; }
+@media (max-width: 1100px) { .tests-panel { grid-template-columns: 1fr; } }

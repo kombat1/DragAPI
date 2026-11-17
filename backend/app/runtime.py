@@ -22,7 +22,8 @@ class Database:
         for model in models:
             columns = [sa.Column("id", sa.Integer, primary_key=True, autoincrement=True)]
             columns += [sa.Column(f["name"], DB_TYPES[f["type"]], nullable=True) for f in model["fields"]]
-            self.tables[model["name"]] = sa.Table(model["name"], self.metadata, *columns)
+            # sqlite_autoincrement: id удалённых записей не выдаются повторно (как serial в PostgreSQL)
+            self.tables[model["name"]] = sa.Table(model["name"], self.metadata, *columns, sqlite_autoincrement=True)
         self._sync_schema()
 
     def _sync_schema(self):
@@ -86,8 +87,12 @@ class Database:
             return conn.execute(sa.select(sa.func.count()).select_from(table)).scalar_one()
 
     def clear(self, model):
+        """Удалить все записи и сбросить счётчик id: после очистки нумерация снова с 1."""
         with self.engine.begin() as conn:
             conn.execute(self.tables[model].delete())
+            if self.engine.dialect.name == "sqlite":
+                if sa.inspect(conn).has_table("sqlite_sequence"):
+                    conn.execute(sa.text("DELETE FROM sqlite_sequence WHERE name = :n"), {"n": model})
 
     def dispose(self):
         self.engine.dispose()
