@@ -24,6 +24,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Mount, Router
 
 from . import auth, codegen, sandbox, storage, testing, vault
+from .deploy import deployments, docker_available
 from .pyenv import envs, validate_packages
 from .blocks import catalog
 from .graph import CompiledProject, GraphError, compile_project
@@ -527,7 +528,9 @@ def save_project(pid: str, body: GraphIn):
 
 
 @app.delete("/api/projects/{pid}")
-def delete_project(pid: str):
+async def delete_project(pid: str):
+    if docker_available():
+        await deployments.stop(pid, remove_data=True)
     runner.unmount(pid)
     envs.remove(pid)
     try:
@@ -595,6 +598,47 @@ def run_project(pid: str):
         "issues": [w.as_dict() for w in compiled.warnings],
         "migrations": db.applied if db else [],
     }
+
+
+class DeployIn(BaseModel):
+    port: int | None = None
+    public: bool = False
+
+
+@app.get("/api/projects/{pid}/deploy")
+async def deploy_status(pid: str):
+    _load(pid)
+    return await deployments.status(pid)
+
+
+@app.post("/api/projects/{pid}/deploy")
+async def deploy_start(pid: str, body: DeployIn):
+    """Собрать образ из экспорта и запустить контейнер (в фоне, статус — GET)."""
+    if not docker_available():
+        raise HTTPException(400, {"message": "Docker недоступен на этой машине", "issues": []})
+    if body.port is not None and not 1024 <= body.port <= 65535:
+        raise HTTPException(400, {"message": "порт: 1024–65535", "issues": []})
+    project = _with_secrets(pid, _load(pid))
+    compiled = _compile(project)
+    env = {e.key: e.value for e in compiled.env}
+    try:
+        deployments.start(pid, codegen.generate_files(compiled), env, body.port, body.public)
+    except RuntimeError as e:
+        raise HTTPException(409, str(e)) from None
+    return await deployments.status(pid)
+
+
+@app.delete("/api/projects/{pid}/deploy")
+async def deploy_stop(pid: str, remove_data: bool = False):
+    _load(pid)
+    await deployments.stop(pid, remove_data)
+    return await deployments.status(pid)
+
+
+@app.get("/api/projects/{pid}/deploy/logs")
+async def deploy_logs(pid: str, tail: int = 200):
+    _load(pid)
+    return {"logs": await deployments.logs(pid, tail)}
 
 
 class SchemaIn(BaseModel):

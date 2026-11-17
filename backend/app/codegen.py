@@ -365,6 +365,9 @@ def generate_files(project: CompiledProject) -> dict[str, str]:
         "requirements.txt": requirements(project),
         ".env.example": env_example(project),
     }
+    files["Dockerfile"] = DOCKERFILE
+    files[".dockerignore"] = ".env\n.env.*\n__pycache__/\n*.db\n*.sqlite\n.pytest_cache/\n"
+    files["docker-compose.yml"] = DOCKER_COMPOSE
     if project.tests:
         files["tests/test_api.py"] = generate_tests(project)
         files["tests/conftest.py"] = ("import os\nimport sys\n\n"
@@ -380,3 +383,42 @@ def generate_files(project: CompiledProject) -> dict[str, str]:
                 + b.code.rstrip() + "\n"
             )
     return files
+
+
+DOCKERFILE = """FROM python:3.12-slim
+
+WORKDIR /app
+ENV PYTHONDONTWRITEBYTECODE=1 \\
+    PYTHONUNBUFFERED=1 \\
+    DATABASE_URL=sqlite:////data/app.db
+
+COPY requirements.txt .
+# повторы и увеличенный таймаут — сборка переживает медленную или нестабильную сеть
+RUN pip install --no-cache-dir --retries 10 --timeout 60 -r requirements.txt
+
+COPY . .
+# непривилегированный пользователь; /data — том для базы (именованный том унаследует владельца)
+RUN useradd --system --uid 10001 app && mkdir -p /data && chown app /data
+USER app
+VOLUME /data
+EXPOSE 8000
+
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers"]
+"""
+
+DOCKER_COMPOSE = """services:
+  api:
+    build: .
+    ports:
+      - "127.0.0.1:8000:8000"   # уберите 127.0.0.1:, чтобы открыть доступ из сети
+    env_file: .env              # cp .env.example .env и заполните секреты
+    volumes:
+      - data:/data
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+
+volumes:
+  data:
+"""

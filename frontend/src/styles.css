@@ -328,3 +328,4 @@ b.yes { color: var(--ok); } b.no { color: var(--danger); }
 fieldset { border: none; margin: 0; min-width: 0; }
 fieldset.inspector { padding: 12px; }
 fieldset.settings-body { padding: 0; }
+.deploy-status { display: flex; gap: 10px; align-items: center; margin: 8px 0; } .deploy-settings { align-items: flex-start; gap: 12px; } .deploy-settings .field { flex: 0 0 200px; } .deploy-settings .toggle { flex: 1; }

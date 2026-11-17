@@ -68,5 +68,9 @@ export const api = {
   runTests: (pid, body) => request('POST', `/api/projects/${pid}/tests/run`, body),
   schemaPlan: (pid, models) => request('POST', `/api/projects/${pid}/schema/plan`, { models }),
   schemaDropExtra: (pid, models) => request('POST', `/api/projects/${pid}/schema/drop-extra`, { models }),
+  deployStatus: (pid) => request('GET', `/api/projects/${pid}/deploy`),
+  deploy: (pid, body) => request('POST', `/api/projects/${pid}/deploy`, body),
+  deployStop: (pid, removeData) => request('DELETE', `/api/projects/${pid}/deploy?remove_data=${removeData ? 'true' : 'false'}`),
+  deployLogs: (pid) => request('GET', `/api/projects/${pid}/deploy/logs`),
   exportUrl: (id) => `/api/projects/${id}/export`,
 }

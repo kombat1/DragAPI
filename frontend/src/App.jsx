@@ -19,6 +19,7 @@ import Inspector from './components/Inspector.jsx'
 import BottomPanel from './components/BottomPanel.jsx'
 import ProjectSettings from './components/ProjectSettings.jsx'
 import { LoginScreen, MembersModal, UserMenu } from './components/Auth.jsx'
+import DeployModal from './components/DeployModal.jsx'
 import { DEFAULT_FIREWALL, normalizeFirewall } from './components/FirewallTab.jsx'
 import { newId } from './components/ProjectSettings.jsx'
 
@@ -113,6 +114,7 @@ function Editor({ catalog, projectId, onProjectsChanged, me }) {
   const [role, setRole] = useState('owner')
   const readOnly = role === 'viewer'
   const [membersOpen, setMembersOpen] = useState(false)
+  const [deployOpen, setDeployOpen] = useState(false)
   const [name, setName] = useState('')
   const [nodes, setNodes] = useState([])
   const [edges, setEdges] = useState([])
@@ -424,8 +426,11 @@ function Editor({ catalog, projectId, onProjectsChanged, me }) {
             </button>
           </>
         )}
-        <button onClick={exportZip} disabled={errors > 0} title="Скачать обычное FastAPI-приложение">
+        <button onClick={exportZip} disabled={errors > 0} title="Скачать обычное FastAPI-приложение (с Dockerfile)">
           Экспорт в FastAPI
+        </button>
+        <button onClick={() => setDeployOpen(true)} title="Собрать образ и запустить контейнер на этой машине">
+          🚀 Деплой
         </button>
       </header>
 
@@ -502,6 +507,9 @@ function Editor({ catalog, projectId, onProjectsChanged, me }) {
           readOnly,
         }}
       />
+      {deployOpen && (
+        <DeployModal projectId={projectId} readOnly={readOnly} dirty={dirty} onClose={() => setDeployOpen(false)} />
+      )}
       {membersOpen && <MembersModal projectId={projectId} me={me} onClose={() => setMembersOpen(false)} />}
       {settingsOpen && (
         <ProjectSettings

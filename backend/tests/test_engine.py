@@ -1,4 +1,5 @@
 import copy
+import os
 import importlib.util
 import re
 import json
@@ -1039,3 +1040,63 @@ def test_preview_api_stays_public_with_auth(tmp_path, monkeypatch):
     c.put(f"/api/projects/{pid}", json=_graph_body())
     c.post(f"/api/projects/{pid}/run")
     assert TestClient(platform_app).get(f"/run/{pid}/hello").status_code == 200
+
+
+# --- шаг 4б: деплой ---
+
+def test_export_has_docker_files():
+    files = codegen.generate_files(compile_project(EXAMPLE))
+    docker = files["Dockerfile"]
+    assert "USER app" in docker and "VOLUME /data" in docker and "sqlite:////data/app.db" in docker
+    assert ".env" in files[".dockerignore"] and "127.0.0.1:8000:8000" in files["docker-compose.yml"]
+    assert "dev-secret" not in "".join(files.values())
+
+
+def test_deploy_api_permissions_and_no_docker(tmp_path, monkeypatch):
+    from app import main as main_mod
+    new = _auth_platform(tmp_path, monkeypatch)
+    admin = new()
+    admin.post("/api/auth/setup", json={"username": "boss", "password": "very-secret-1"})
+    admin.post("/api/users", json={"username": "viewer1", "password": "viewer-pass", "role": "user"})
+    pid = admin.post("/api/projects", json={"name": "p"}).json()["id"]
+    uid = next(u["id"] for u in admin.get("/api/users").json() if u["username"] == "viewer1")
+    admin.put(f"/api/projects/{pid}/members", json={"members": {uid: "viewer"}})
+    viewer = new()
+    viewer.post("/api/auth/login", json={"username": "viewer1", "password": "viewer-pass"})
+    monkeypatch.setattr(main_mod, "docker_available", lambda: False)
+    monkeypatch.setattr(main_mod.deployments, "status", _async_value({"docker": False, "container": None}))
+    assert viewer.get(f"/api/projects/{pid}/deploy").status_code == 200
+    assert viewer.post(f"/api/projects/{pid}/deploy", json={}).status_code == 403
+    r = admin.post(f"/api/projects/{pid}/deploy", json={})
+    assert r.status_code == 400 and "Docker недоступен" in r.json()["detail"]["message"]
+
+
+def _async_value(value):
+    async def f(*_args, **_kwargs):
+        return value
+    return f
+
+
+@pytest.mark.skipif(os.environ.get("DRAGAPI_DOCKER_TESTS") != "1", reason="долгий тест: DRAGAPI_DOCKER_TESTS=1")
+def test_real_docker_deploy(tmp_path, monkeypatch):
+    import asyncio
+    import urllib.request
+    from app import deploy
+    monkeypatch.setattr(deploy, "DEPLOY_DIR", tmp_path)
+    compiled = compile_project(EXAMPLE)
+    manager = deploy.DeployManager()
+
+    async def scenario():
+        job = manager.start("pytestdeploy", codegen.generate_files(compiled),
+                            {e.key: e.value for e in compiled.env}, None, False)
+        await job.task
+        return job
+
+    job = asyncio.run(scenario())
+    try:
+        assert job.state == "ready", job.log[-3000:]
+        port = manager.settings("pytestdeploy")["port"]
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/hello?name=CI", timeout=5) as r:
+            assert json.loads(r.read())["message"].startswith("Hello, CI!")
+    finally:
+        asyncio.run(manager.stop("pytestdeploy", remove_data=True))
