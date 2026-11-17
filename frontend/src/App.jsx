@@ -681,6 +681,7 @@ function Editor({ catalog, projectId, onProjectsChanged, me }) {
             defaultEdgeOptions={{ style: { strokeWidth: 2 } }}
             colorMode="system"
             defaultViewport={{ x: 0, y: 0, zoom: 1 }}
+            minZoom={0.1}
           >
             <Background gap={20} />
             <Controls />
