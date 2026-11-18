@@ -3,14 +3,16 @@ import { api } from '../api.js'
 
 const fmtTime = (t) => (t ? new Date(t * 1000).toLocaleTimeString() : '')
 
-// ---------- тест-чат: бот по текущему графу, без Telegram ----------
+// ---------- тест-чат в стиле Telegram: бот по текущему графу, без Telegram ----------
 
 const FILE_ICON = { photo: '🖼', document: '📄', video: '🎬', voice: '🎤', audio: '🎵' }
+const hm = (t) => (t ? new Date(t * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '')
+const kb = (n) => (n >= 1048576 ? `${(n / 1048576).toFixed(1)} МБ` : `${Math.max(1, Math.round(n / 1024))} КБ`)
 
 function readFile(file) {
+  // содержимое — только для файлов до 2 МБ: этого хватает, чтобы проверить «Скачать файл» в тест-чате
   return new Promise((resolve) => {
-    // превью только для небольших картинок — в тест-чате файл никуда не отправляется
-    if (!file.type.startsWith('image/') || file.size > 1_500_000) return resolve(null)
+    if (file.size > 2_000_000) return resolve(null)
     const r = new FileReader()
     r.onload = () => resolve(r.result)
     r.onerror = () => resolve(null)
@@ -18,7 +20,13 @@ function readFile(file) {
   })
 }
 
-export function EmulatorPanel({ projectId, graph, readOnly, onSelectNode, onTrace }) {
+function rows(items, columns = 1) {
+  const out = []
+  for (let i = 0; i < items.length; i += columns) out.push(items.slice(i, i + columns))
+  return out
+}
+
+export function EmulatorPanel({ projectId, graph, readOnly, onSelectNode, onTrace, botName, username }) {
   const [state, setState] = useState({ messages: [], log: [], waiting: false, saved: {} })
   const [text, setText] = useState('')
   const [error, setError] = useState(null)
@@ -26,10 +34,15 @@ export function EmulatorPanel({ projectId, graph, readOnly, onSelectNode, onTrac
   const [group, setGroup] = useState(false)
   const [asOther, setAsOther] = useState(false)
   const [replyTo, setReplyTo] = useState(null)
+  const [cmdsOpen, setCmdsOpen] = useState(false)
+  const [sideOpen, setSideOpen] = useState(true)
   const list = useRef(null)
   const fileInput = useRef(null)
   const graphRef = useRef(graph)
   graphRef.current = graph
+
+  const commands = (graph?.nodes || []).filter((n) => n.type === 'bot_command').map((n) => n.data)
+  const schedules = (graph?.nodes || []).filter((n) => n.type === 'bot_schedule')
 
   const apply = (s) => {
     setState(s)
@@ -37,7 +50,7 @@ export function EmulatorPanel({ projectId, graph, readOnly, onSelectNode, onTrac
   }
   useEffect(() => {
     api.botEmulatorState(projectId).then(apply).catch(() => {})
-    // пока открыт — подтягиваем сообщения, которые бот отправляет после пауз
+    // подтягиваем то, что бот отправляет после пауз и отложенных веток
     const t = setInterval(() => api.botEmulatorState(projectId).then(apply).catch(() => {}), 1500)
     return () => clearInterval(t)
   }, [projectId]) // eslint-disable-line react-hooks/exhaustive-deps
@@ -48,6 +61,7 @@ export function EmulatorPanel({ projectId, graph, readOnly, onSelectNode, onTrac
   const send = async (body) => {
     setBusy(true)
     setError(null)
+    setCmdsOpen(false)
     try {
       const chat = { group, as_other: asOther, reply_to: replyTo?.id ?? null }
       apply(await api.botEmulator(projectId, { graph: graphRef.current, ...chat, ...body }))
@@ -68,111 +82,210 @@ export function EmulatorPanel({ projectId, graph, readOnly, onSelectNode, onTrac
     const f = e.target.files?.[0]
     e.target.value = ''
     if (!f) return
-    send({ file: { name: f.name, mime: f.type, size: f.size, preview: await readFile(f) }, text: text || null })
+    const data = await readFile(f)
+    const preview = f.type.startsWith('image/') && f.size <= 1_500_000 ? data : null
+    send({ file: { name: f.name, mime: f.type, size: f.size, preview, data }, text: text || null })
     setText('')
   }
   const errors = state.log.filter((e) => e.kind === 'error')
   const keyboard = state.keyboard || null
-  const visible = state.messages
+  const title = group ? 'Тестовая группа' : botName || 'Бот'
+  const subtitle = busy ? 'печатает…' : group ? 'вы, Участник и бот' : username ? `@${username} · бот` : 'бот'
 
-  return (
-    <div className="emulator">
-      <div className="emu-chat">
-        <div className="emu-modes">
-          <label className="check">
-            <input type="checkbox" checked={group} onChange={(e) => setGroup(e.target.checked)} /> группа
-          </label>
-          {group && (
+  const bubble = (m) => {
+    const mine = m.from === 'user' && m.user?.id !== 2
+    const other = m.from === 'user' && m.user?.id === 2
+    const foreign = m.from === 'bot' && m.chat && !['1', '-100'].includes(m.chat)
+    const media = m.photo ? { kind: 'photo', preview: m.photo } : m.media
+    return (
+      <div key={m.id} className={`tg-row ${mine ? 'out' : 'in'}`}>
+        <div className={`tg-bubble ${mine ? 'out' : 'in'} ${m.deleted ? 'deleted' : ''}`}>
+          {other && <div className="tg-author c1">Участник</div>}
+          {group && m.from === 'bot' && <div className="tg-author c2">{botName || 'Бот'}</div>}
+          {foreign && <div className="tg-author c3">→ в чат {m.chat}</div>}
+          {m.reply_to && <div className="tg-quote">↩ ответ на #{m.reply_to}</div>}
+          {m.deleted ? (
+            <div className="tg-text deleted">🗑 Сообщение удалено</div>
+          ) : (
             <>
-              <select value={asOther ? 'other' : 'me'} onChange={(e) => setAsOther(e.target.value === 'other')}>
-                <option value="me">писать от себя</option>
-                <option value="other">писать от «Участника»</option>
-              </select>
-              <label className="check" title="Вы — администратор тестовой группы (is_chat_admin)">
-                <input type="checkbox" checked={!!state.chat_admin} onChange={(e) => send({ chat_admin: e.target.checked })} /> я админ группы
-              </label>
-              <button className="small" disabled={readOnly || busy} onClick={() => send({ member: 'join', as_other: true })}>
-                + участник вошёл
-              </button>
+              {media &&
+                (media.preview ? (
+                  <img src={media.preview} alt={media.name || ''} className="tg-photo" />
+                ) : (
+                  <div className="tg-file">
+                    <span className="tg-file-icon">{FILE_ICON[media.kind] || '📎'}</span>
+                    <span>
+                      <b>{media.name}</b>
+                      <br />
+                      <span className="tg-meta">{media.size ? kb(media.size) : media.kind}</span>
+                    </span>
+                  </div>
+                ))}
+              {m.invoice ? (
+                <div className="tg-invoice">
+                  <b>{m.invoice.title}</b>
+                  <div>{m.invoice.description}</div>
+                  <div className="tg-price">
+                    {m.invoice.currency === 'XTR' ? `${m.invoice.amount} ⭐` : `${(m.invoice.amount / 100).toFixed(2)} ${m.invoice.currency}`}
+                  </div>
+                </div>
+              ) : (
+                m.text && <div className="tg-text">{m.text}</div>
+              )}
             </>
           )}
-          <span className="spacer" />
-          Тестировать как{' '}
-          <select value={state.role || 'user'} onChange={(e) => send({ as_role: e.target.value })} disabled={readOnly || busy}>
-            {(state.roles || ['admin', 'user']).map((r) => (
-              <option key={r} value={r}>
-                {r}
-              </option>
-            ))}
-          </select>
+          <span className="tg-time">
+            {m.note && <i>{m.note} · </i>}
+            {hm(m.t)}
+            {mine && <span className="tg-ticks">✓✓</span>}
+            {group && !m.deleted && (
+              <button className="tg-reply" title="Ответить на это сообщение" onClick={() => setReplyTo(m)}>
+                ↩
+              </button>
+            )}
+          </span>
         </div>
-        <div className="emu-messages" ref={list}>
-          {visible.length === 0 && (
-            <div className="muted pad">
-              Это тест-чат: напишите боту, например <code>/start</code>. Работает по текущему графу, даже несохранённому, без
-              Telegram и токена. «Группа» — проверить модерацию: пишите от «Участника», отвечайте на сообщения (↩).
-            </div>
-          )}
-          {visible.map((m) =>
-            m.from === 'system' ? (
-              <div key={m.id} className="emu-system">
-                {m.text}
+        {!m.deleted && (m.invoice || m.buttons?.length || m.links?.length) ? (
+          <div className="tg-inline">
+            {m.invoice && (
+              <div className="tg-inline-row">
+                <button disabled={readOnly || busy || !!m.note} onClick={() => send({ pay: { message_id: m.id } })}>
+                  {m.note ? m.note : `Оплатить ${m.invoice.currency === 'XTR' ? `⭐ ${m.invoice.amount}` : ''} (тест)`}
+                </button>
               </div>
-            ) : (
-              <div key={m.id} className={`bubble ${m.from} ${m.user?.id === 2 ? 'other' : ''} ${m.deleted ? 'deleted' : ''}`}>
-                {m.from === 'user' && m.user?.id === 2 && <div className="bubble-author">Участник</div>}
-                {m.from === 'bot' && m.chat && !['1', '-100'].includes(m.chat) && <div className="bubble-author">→ чат {m.chat}</div>}
-                {m.reply_to && <div className="bubble-reply">↩ ответ на сообщение #{m.reply_to}</div>}
-                {m.photo && <img src={m.photo} alt="" className="emu-photo" />}
-                {m.media &&
-                  (m.media.preview ? (
-                    <img src={m.media.preview} alt={m.media.name} className="emu-photo" />
-                  ) : (
-                    <div className="emu-file">
-                      {FILE_ICON[m.media.kind] || '📎'} {m.media.name} {m.media.size ? <span className="muted">{Math.ceil(m.media.size / 1024)} КБ</span> : null}
-                    </div>
-                  ))}
-                {m.text && <div className="bubble-text">{m.text}</div>}
-                {m.invoice && (
-                  <button className="emu-button pay" disabled={readOnly || busy || !!m.note} onClick={() => send({ pay: { message_id: m.id } })}>
-                    💳 Оплатить (тест)
-                  </button>
-                )}
-                {(m.buttons || []).map((b) => (
-                  <button key={b.id} className="emu-button" disabled={readOnly || busy} onClick={() => send({ button: { message_id: m.id, data: b.id, text: b.text } })}>
+            )}
+            {rows(m.buttons || [], m.columns || 1).map((row, i) => (
+              <div key={i} className="tg-inline-row">
+                {row.map((b) => (
+                  <button key={b.id} disabled={readOnly || busy} onClick={() => send({ button: { message_id: m.id, data: b.id, text: b.text } })}>
                     {b.text}
                   </button>
                 ))}
-                {(m.links || []).map((l, i) => (
-                  <a key={i} className="emu-button" href={l.url} target="_blank" rel="noreferrer">
-                    {l.text} ↗
-                  </a>
-                ))}
-                {m.note && <div className="muted">{m.note}</div>}
-                <div className="bubble-time">
-                  {m.deleted && <span className="bubble-deleted">удалено · </span>}#{m.id} {fmtTime(m.t)}
-                  {group && !m.deleted && (
-                    <button className="linklike" title="Ответить на это сообщение" onClick={() => setReplyTo(m)}>
-                      ↩
-                    </button>
-                  )}
-                </div>
               </div>
+            ))}
+            {(m.links || []).map((l, i) => (
+              <div key={`l${i}`} className="tg-inline-row">
+                <a href={l.url} target="_blank" rel="noreferrer">
+                  {l.text} ↗
+                </a>
+              </div>
+            ))}
+          </div>
+        ) : null}
+      </div>
+    )
+  }
+
+  return (
+    <div className="emulator">
+      <div className="tg">
+        <div className="tg-head">
+          <div className="tg-avatar">{(title || 'Б').trim()[0]?.toUpperCase()}</div>
+          <div className="tg-title">
+            <b>{title}</b>
+            <span className={busy ? 'typing' : ''}>{subtitle}</span>
+          </div>
+          <div className="tg-head-tools">
+            <label title="Писать в тестовую группу">
+              <input type="checkbox" checked={group} onChange={(e) => setGroup(e.target.checked)} /> группа
+            </label>
+            {group && (
+              <>
+                <select value={asOther ? 'other' : 'me'} onChange={(e) => setAsOther(e.target.value === 'other')} title="От чьего имени писать">
+                  <option value="me">от себя</option>
+                  <option value="other">от Участника</option>
+                </select>
+                <label title="Вы — администратор тестовой группы (is_chat_admin)">
+                  <input type="checkbox" checked={!!state.chat_admin} onChange={(e) => send({ chat_admin: e.target.checked })} /> админ
+                </label>
+                <button disabled={readOnly || busy} onClick={() => send({ member: 'join', as_other: true })} title="Участник вошёл в группу">
+                  +👤
+                </button>
+              </>
+            )}
+            <select value={state.role || 'user'} onChange={(e) => send({ as_role: e.target.value })} disabled={readOnly || busy} title="Тестировать с ролью">
+              {(state.roles || ['admin', 'user']).map((r) => (
+                <option key={r} value={r}>
+                  роль: {r}
+                </option>
+              ))}
+            </select>
+            {schedules.map((n) => (
+              <button key={n.id} disabled={readOnly || busy} onClick={() => send({ run_schedule: n.id })} title="Выполнить ветку «По расписанию» сейчас">
+                🕘 {n.data.kind === 'interval' ? `${n.data.every_minutes} мин` : n.data.at}
+              </button>
+            ))}
+            <button onClick={() => send({ reset: true })} disabled={readOnly || busy} title="Очистить чат, диалоги и тестовые данные">
+              ⟲
+            </button>
+            <button onClick={() => setSideOpen((v) => !v)} title="Ошибки и сохранённые данные">
+              ⓘ
+            </button>
+          </div>
+        </div>
+        <div className="tg-messages" ref={list}>
+          <div className="tg-date">Сегодня</div>
+          {state.messages.length === 0 && (
+            <div className="tg-service">
+              Тест-чат работает по текущему графу (даже несохранённому) без Telegram и токена. Напишите /start или выберите
+              команду кнопкой «/».
+            </div>
+          )}
+          {state.messages.map((m) =>
+            m.from === 'system' ? (
+              <div key={m.id} className="tg-service">
+                {m.text}
+              </div>
+            ) : (
+              bubble(m)
             ),
+          )}
+          {busy && (
+            <div className="tg-typing">
+              <span />
+              <span />
+              <span />
+            </div>
           )}
         </div>
         {replyTo && (
-          <div className="emu-replying">
-            ↩ ответ на #{replyTo.id}: {String(replyTo.text || replyTo.media?.name || '').slice(0, 60)}{' '}
+          <div className="tg-replying">
+            <span>
+              ↩ Ответ на #{replyTo.id}: {String(replyTo.text || replyTo.media?.name || '').slice(0, 60)}
+            </span>
             <button className="linklike" onClick={() => setReplyTo(null)}>
-              отменить
+              ✕
             </button>
           </div>
         )}
+        {cmdsOpen && commands.length > 0 && (
+          <div className="tg-commands">
+            {commands.map((c) => (
+              <button key={c.command} onClick={() => send({ text: `/${c.command}` })}>
+                <b>/{c.command}</b> <span>{c.description}</span>
+              </button>
+            ))}
+          </div>
+        )}
+        <form className="tg-input" onSubmit={submit}>
+          {commands.length > 0 && (
+            <button type="button" className="tg-icon tg-menu" title="Команды бота" onClick={() => setCmdsOpen((v) => !v)}>
+              /
+            </button>
+          )}
+          <button type="button" className="tg-icon" title="Прикрепить фото или файл" disabled={readOnly || busy} onClick={() => fileInput.current?.click()}>
+            📎
+          </button>
+          <input ref={fileInput} type="file" hidden onChange={attach} />
+          <input className="tg-field" value={text} onChange={(e) => setText(e.target.value)} placeholder={state.waiting ? 'Бот ждёт ответа…' : 'Сообщение'} disabled={readOnly} />
+          <button className="tg-icon tg-send" disabled={readOnly || busy || !text.trim()} title="Отправить">
+            ➤
+          </button>
+        </form>
         {keyboard && (
-          <div className="emu-keyboard">
+          <div className="tg-keyboard">
             {keyboard.map((row, i) => (
-              <div key={i} className="emu-kb-row">
+              <div key={i} className="tg-kb-row">
                 {row.map((b, j) => (
                   <button key={j} disabled={readOnly || busy} onClick={() => (b.request_contact ? send({ contact: true }) : send({ text: b.text }))}>
                     {b.text}
@@ -182,40 +295,186 @@ export function EmulatorPanel({ projectId, graph, readOnly, onSelectNode, onTrac
             ))}
           </div>
         )}
-        <form className="emu-input" onSubmit={submit}>
-          <button type="button" title="Прикрепить фото или файл" disabled={readOnly || busy} onClick={() => fileInput.current?.click()}>
-            📎
-          </button>
-          <input ref={fileInput} type="file" hidden onChange={attach} />
-          <input
-            value={text}
-            onChange={(e) => setText(e.target.value)}
-            placeholder={state.waiting ? 'бот ждёт ответа…' : group ? 'Сообщение в группу' : 'Сообщение или /команда'}
-            disabled={readOnly}
-          />
-          <button className="primary" disabled={readOnly || busy || !text.trim()}>
-            Отправить
-          </button>
-          <button type="button" onClick={() => send({ reset: true })} disabled={readOnly || busy} title="Очистить чат и диалоги">
-            ⟲
-          </button>
-        </form>
         {error && <div className="issue error">{error}</div>}
       </div>
-      <div className="emu-side">
-        <div className="field-label">Ошибки</div>
-        {errors.length ? (
-          errors.map((e, i) => (
-            <div key={i} className="issue error clickable" onClick={() => e.node && onSelectNode(e.node)}>
-              {e.text} {e.node && <span className="muted">· {e.node}</span>}
-            </div>
-          ))
-        ) : (
-          <div className="muted">нет</div>
-        )}
-        <div className="field-label">Сохранено для пользователя (saved)</div>
-        <pre className="run-vars">{JSON.stringify(state.saved, null, 1)}</pre>
+      {sideOpen && (
+        <div className="emu-side">
+          <div className="field-label">Ошибки</div>
+          {errors.length ? (
+            errors.map((e, i) => (
+              <div key={i} className="issue error clickable" onClick={() => e.node && onSelectNode(e.node)}>
+                {e.text} {e.node && <span className="muted">· {e.node}</span>}
+              </div>
+            ))
+          ) : (
+            <div className="muted">нет</div>
+          )}
+          <div className="field-label">Сохранено для пользователя (saved)</div>
+          <pre className="run-vars">{JSON.stringify(state.saved, null, 1)}</pre>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ---------- статистика ----------
+
+export function BotStats({ projectId, graph, onCounts }) {
+  const [source, setSource] = useState('live')
+  const [st, setSt] = useState(null)
+  const [onCanvas, setOnCanvas] = useState(false)
+  useEffect(() => {
+    let alive = true
+    const load = () => api.botStats(projectId, source).then((s) => alive && setSt(s)).catch(() => {})
+    load()
+    const t = setInterval(load, 4000)
+    return () => {
+      alive = false
+      clearInterval(t)
+    }
+  }, [projectId, source])
+  useEffect(() => {
+    onCounts?.(onCanvas && st ? st.nodes : null)
+  }, [onCanvas, st]) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => () => onCounts?.(null), []) // eslint-disable-line react-hooks/exhaustive-deps
+  if (!st) return null
+  const maxDay = Math.max(1, ...st.days.map((d) => d.users))
+  const titleOf = (id) => {
+    const n = (graph?.nodes || []).find((x) => x.id === id)
+    return n ? `${n.type.replace('bot_', '')} · ${id}` : id
+  }
+  const funnel = Object.entries(st.nodes)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 25)
+  const top = funnel[0]?.[1] || 1
+  return (
+    <div className="bot-stats">
+      <div className="stats-tools">
+        <select value={source} onChange={(e) => setSource(e.target.value)}>
+          <option value="live">Работающий бот</option>
+          <option value="emulator">Тест-чат</option>
+        </select>
+        <label className="check">
+          <input type="checkbox" checked={onCanvas} onChange={(e) => setOnCanvas(e.target.checked)} /> показать воронку на канвасе
+        </label>
+        <span className="spacer" />
+        <span className="muted">Выгрузка:</span>
+        <a className="button small" href={api.botExportUrl(projectId, 'users', 'xlsx')}>
+          Пользователи · Excel
+        </a>
+        <a className="button small" href={api.botExportUrl(projectId, 'users', 'csv')}>
+          CSV
+        </a>
+        <a className="button small" href={api.botExportUrl(projectId, 'payments', 'xlsx')}>
+          Платежи · Excel
+        </a>
       </div>
+      <div className="stats-cards">
+        {[
+          ['Пользователей', st.users_total],
+          ['Новых за сутки', st.new_today],
+          ['Активных сегодня', st.active_today],
+          ['Активных за 7 дней', st.active_week],
+          ['Сообщений сегодня', st.messages_today],
+          ['Отложено задач', st.scheduled.length],
+        ].map(([label, value]) => (
+          <div key={label} className="stat-card">
+            <div className="stat-value">{value}</div>
+            <div className="muted">{label}</div>
+          </div>
+        ))}
+      </div>
+      <div className="stats-grid">
+        <div>
+          <div className="field-label">Активные пользователи за 14 дней</div>
+          <div className="bars">
+            {st.days.map((d) => (
+              <div key={d.date} className="bar" title={`${d.date}: ${d.users} польз., ${d.messages} сообщ.`}>
+                <span style={{ height: `${(d.users / maxDay) * 100}%` }} />
+                <em>{d.date.slice(8)}</em>
+              </div>
+            ))}
+          </div>
+        </div>
+        <div>
+          <div className="field-label">Команды</div>
+          {st.commands.length ? (
+            st.commands.map(([c, n]) => (
+              <div key={c} className="row-line">
+                <code>{c}</code> <span className="muted">{n}</span>
+              </div>
+            ))
+          ) : (
+            <div className="muted">пока нет</div>
+          )}
+        </div>
+        <div>
+          <div className="field-label">Воронка: сколько раз дошли до блока</div>
+          {funnel.length ? (
+            funnel.map(([id, n]) => (
+              <div key={id} className="funnel-row" title={titleOf(id)}>
+                <span className="funnel-bar" style={{ width: `${(n / top) * 100}%` }} />
+                <span className="funnel-label">{titleOf(id)}</span>
+                <b>{n}</b>
+              </div>
+            ))
+          ) : (
+            <div className="muted">данных пока нет — напишите боту (или в тест-чат)</div>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ---------- файлы ----------
+
+export function BotFiles({ projectId }) {
+  const [files, setFiles] = useState(null)
+  useEffect(() => {
+    let alive = true
+    const load = () =>
+      api
+        .botFiles(projectId)
+        .then((f) => alive && setFiles(f))
+        .catch(() => alive && setFiles([]))
+    load()
+    const t = setInterval(load, 4000)
+    return () => {
+      alive = false
+      clearInterval(t)
+    }
+  }, [projectId])
+  if (!files) return null
+  if (!files.length) return <div className="muted pad">Скачанных файлов нет. Они появятся, когда блок «Скачать файл» сработает у работающего бота.</div>
+  return (
+    <div className="data-table-wrap">
+      <table className="data-table">
+        <thead>
+          <tr>
+            <th>Когда</th>
+            <th>От кого</th>
+            <th>Файл</th>
+            <th>Размер</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {files.map((f) => (
+            <tr key={f.id}>
+              <td>{new Date(f.t * 1000).toLocaleString()}</td>
+              <td>
+                {f.user_name} <span className="muted">{f.user_id}</span>
+              </td>
+              <td>
+                {FILE_ICON[f.kind] || '📎'} {f.name}
+              </td>
+              <td>{kb(f.size)}</td>
+              <td>{f.stored && <a href={api.botFileUrl(projectId, f.id)}>⬇ скачать</a>}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   )
 }

@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import io
+import json
 import re
 import zipfile
 from collections import deque
@@ -62,7 +63,9 @@ async def lifespan(_app):
     hub.scheduler_task = asyncio.ensure_future(hub.scheduler())
     bots.manager.hub, bots.manager.loop = hub, loop
     await bots.manager.autostart()
+    bot_scheduler = asyncio.ensure_future(bots.manager.scheduler())
     yield
+    bot_scheduler.cancel()
     bots.manager.stop_all()
     hub.scheduler_task.cancel()
     hub.telegram.stop_all()
@@ -344,6 +347,7 @@ class TestsRunIn(BaseModel):
 class CreateIn(BaseModel):
     name: str = "Новый проект"
     kind: str = "api"
+    template: str | None = None    # шаблон бота (kind = bot)
 
 
 def _load(pid: str) -> dict:
@@ -544,6 +548,13 @@ def create_project(body: CreateIn, request: Request):
         raise HTTPException(400, "тип проекта: api, automation или bot")
     default = {"automation": "Новый сценарий", "bot": "Новый бот"}.get(body.kind, "Новый проект")
     project = storage.create(body.name.strip() or default, body.kind)
+    if body.template:
+        from .bot_templates import build
+        graph = build(body.template) if body.kind == "bot" else None
+        if graph is None:
+            storage.delete(project["id"])
+            raise HTTPException(400, f"нет шаблона «{body.template}»")
+        project = storage.save(project["id"], {**project, **graph})
     if _user(request):
         auth.store.set_owner(project["id"], _user(request)["id"])
     return project
@@ -1144,6 +1155,7 @@ class EmulatorIn(BaseModel):
     contact: bool = False          # «поделиться номером»
     member: str | None = None      # join / leave — участник вошёл или вышел
     chat_admin: bool | None = None # «вы» — администратор тестовой группы
+    run_schedule: str | None = None   # id блока «По расписанию» — выполнить ветку сейчас
     reset: bool = False
 
 
@@ -1201,9 +1213,18 @@ async def bot_emulator(pid: str, body: EmulatorIn):
         kind = "photo" if mime.startswith("image/") else "video" if mime.startswith("video/") else \
             "audio" if mime.startswith("audio/") else "document"
         preview = body.file.get("preview")
+        data = body.file.get("data")
         media = {"kind": kind, "file_id": "emu-" + uuid.uuid4().hex[:10], "name": str(body.file.get("name") or "file")[:200],
                  "size": body.file.get("size"), "mime": mime,
-                 "preview": preview if isinstance(preview, str) and len(preview) < 2_000_000 else None}
+                 "preview": preview if isinstance(preview, str) and len(preview) < 2_000_000 else None,
+                 "data": data if isinstance(data, str) and len(data) < 3_000_000 else None}
+    if body.run_schedule:
+        route = next((r for r in compiled.schedules if r.node == body.run_schedule), None)
+        if route is None:
+            raise HTTPException(404, "нет такого блока «По расписанию» (или в нём ошибки)")
+        engine.transport.system(f"🕘 запуск по расписанию ({route.value}) — в тест-чате вручную")
+        engine.run_schedule(route)
+        await bots.emulate(engine)
     if any(x is not None for x in (body.text, body.button, body.pay, media, body.member)) or body.contact:
         await bots.emulate(engine, body.text, body.button, pay=body.pay, group=body.group, as_other=body.as_other,
                            reply_to=body.reply_to, media=media, contact=body.contact, member=body.member)
@@ -1298,6 +1319,95 @@ async def bot_refund(pid: str, body: RefundIn):
         raise HTTPException(502, f"Telegram: {e}") from None
     store.mark_refunded(body.charge_id)
     return {"ok": True}
+
+
+@app.get("/api/bots/templates")
+def bots_templates():
+    from .bot_templates import listing
+    return listing()
+
+
+def _bot_store(pid: str, source: str):
+    if source == "emulator":
+        engine = bots.manager.emulators.get(pid)
+        return engine.store if engine else bots.BotStore(None)
+    return bots.manager.store(pid)
+
+
+@app.get("/api/projects/{pid}/bot/stats")
+def bot_stats(pid: str, source: str = "live"):
+    """Статистика: пользователи, активность по дням, команды, воронка по блокам (live — бот, emulator — тест-чат)."""
+    _bot_project(pid)
+    store = _bot_store(pid, source)
+    return {**store.stats(), "scheduled": store.pending()}
+
+
+@app.get("/api/projects/{pid}/bot/files")
+def bot_files(pid: str):
+    _bot_project(pid)
+    return bots.manager.store(pid).files()
+
+
+@app.get("/api/projects/{pid}/bot/files/{fid}")
+def bot_file(pid: str, fid: str):
+    _bot_project(pid)
+    rec = next((f for f in bots.manager.store(pid).files() if f["id"] == fid), None)
+    path = bots.BOTS_DIR / pid / "files" / f"{fid}_{rec['name']}" if rec else None
+    if rec is None or not path.exists():
+        raise HTTPException(404, "файл не найден")
+    return FileResponse(path, filename=rec["name"], media_type=rec.get("mime") or "application/octet-stream")
+
+
+@app.get("/api/projects/{pid}/bot/export")
+def bot_export(pid: str, what: str = "users", format: str = "csv"):
+    """Выгрузка пользователей (каждый ключ saved — колонка) или платежей в CSV / Excel."""
+    import csv
+    project = _bot_project(pid)
+    store = bots.manager.store(pid)
+    if what == "users":
+        users = store.users()
+        keys = sorted({k for u in users for k in (u.get("saved") or {})})
+        header = ["id", "имя", "username", "роль", "сообщений", "первый визит", "последний визит"] + keys
+        fmt_t = lambda t: time.strftime("%Y-%m-%d %H:%M", time.localtime(t)) if t else ""  # noqa: E731
+        rows = [[u["id"], u.get("name", ""), u.get("username", ""), u.get("role") or "user", u.get("messages", 0),
+                 fmt_t(u.get("first_seen")), fmt_t(u.get("last_seen"))] +
+                [_cell((u.get("saved") or {}).get(k)) for k in keys] for u in users]
+    elif what == "payments":
+        header = ["когда", "пользователь", "id", "сумма", "валюта", "id платежа", "возвращён"]
+        rows = [[time.strftime("%Y-%m-%d %H:%M", time.localtime(p["t"])), p.get("user_name", ""), p.get("user_id", ""),
+                 p.get("amount") if p.get("currency") == "XTR" else (p.get("amount") or 0) / 100, p.get("currency"),
+                 p.get("charge_id"), "да" if p.get("refunded") else ""] for p in store.payments()]
+    else:
+        raise HTTPException(400, "what: users или payments")
+    base = f"{re.sub(r'[^A-Za-z0-9_-]+', '_', project.get('name') or pid)}-{what}"
+    if format == "xlsx":
+        from openpyxl import Workbook
+        wb = Workbook()
+        ws = wb.active
+        ws.title = {"users": "Пользователи", "payments": "Платежи"}[what]
+        ws.append(header)
+        for r in rows:
+            ws.append(r)
+        for col in ws.columns:
+            ws.column_dimensions[col[0].column_letter].width = min(max(len(str(c.value or "")) for c in col) + 2, 50)
+        buf = io.BytesIO()
+        wb.save(buf)
+        return Response(buf.getvalue(), headers={"Content-Disposition": f'attachment; filename="{base}.xlsx"'},
+                        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    if format != "csv":
+        raise HTTPException(400, "format: csv или xlsx")
+    buf = io.StringIO()
+    w = csv.writer(buf, delimiter=";")   # «;» — Excel в русской локали открывает такой CSV по колонкам
+    w.writerow(header)
+    w.writerows(rows)
+    return Response("\ufeff" + buf.getvalue(), media_type="text/csv; charset=utf-8",
+                    headers={"Content-Disposition": f'attachment; filename="{base}.csv"'})
+
+
+def _cell(v):
+    if v is None or isinstance(v, (str, int, float, bool)):
+        return v
+    return json.dumps(v, ensure_ascii=False)
 
 
 @app.get("/api/projects/{pid}/bot/payments")

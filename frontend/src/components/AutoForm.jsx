@@ -394,6 +394,12 @@ export function autoSummary(type, d) {
       return `${d.target || 'себе'} → ${d.role}`
     case 'bot_file':
       return `${{ any: 'любой файл', photo: 'фото', document: 'документ', video: 'видео', voice: 'голосовое', audio: 'аудио' }[d.kind]}${d.where && d.where !== 'any' ? ` · ${d.where === 'group' ? 'группы' : 'личка'}` : ''}`
+    case 'bot_download':
+      return `${d.source} → ${d.var} (${{ save: 'сохранить', text: 'текст', base64: 'base64' }[d.mode]})`
+    case 'bot_delay':
+      return `через ${d.amount} ${{ minutes: 'мин', hours: 'ч', days: 'дн.' }[d.unit]}`
+    case 'bot_schedule':
+      return d.kind === 'interval' ? `каждые ${d.every_minutes} мин` : `в ${d.at}${(d.weekdays || []).length ? ` (${d.weekdays.length} дн.)` : ' ежедневно'}`
     case 'bot_member':
       return d.action === 'leave' ? 'участник вышел' : 'новый участник'
     case 'bot_send_file':

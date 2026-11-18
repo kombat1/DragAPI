@@ -490,3 +490,210 @@ def test_live_group_moderation_and_refund(platform, monkeypatch):
     assert c.get(f"/api/projects/{pid}/bot/payments").json()[0]["refunded"]
     assert c.post(f"/api/projects/{pid}/bot/payments/refund", json={"charge_id": "ch-9"}).status_code == 409
     c.post(f"/api/projects/{pid}/bot/stop")
+
+
+# --- шаблоны, отложенные ветки, расписание, скачивание, статистика, выгрузка ---
+
+from app import bot_templates
+
+
+@pytest.mark.parametrize("tid", list(bot_templates.TEMPLATES))
+def test_templates_compile(tid):
+    g = {"name": tid, "kind": "bot", **bot_templates.build(tid)}
+    p = compile_bot(g)
+    assert p.commands or p.messages or p.members
+    assert not [w for w in p.warnings if "не подключён" in w.message], [w.message for w in p.warnings]
+    ids = [n["id"] for n in g["nodes"]]
+    assert len(set((n["position"]["x"], n["position"]["y"]) for n in g["nodes"])) == len(ids)   # блоки не наложены
+
+
+def test_templates_in_emulator(platform):
+    c = platform
+    assert {t["id"] for t in c.get("/api/bots/templates").json()} == set(bot_templates.TEMPLATES)
+    assert c.post("/api/projects", json={"name": "x", "kind": "bot", "template": "nope"}).status_code == 400
+
+    def make(tid):
+        p = c.post("/api/projects", json={"name": tid, "kind": "bot", "template": tid}).json()
+        assert p["nodes"] and p["kind"] == "bot"
+        return p["id"]
+
+    def say(pid, **kw):
+        r = c.post(f"/api/projects/{pid}/bot/emulator", json=kw)
+        assert r.status_code == 200, r.text
+        return r.json()
+
+    def bot(st):
+        return [m["text"] for m in st["messages"] if m["from"] in ("bot", "system")]
+
+    # запись на приём: услуга → имя → дата → телефон → подтверждение → напоминание (в тест-чате через ~3 с)
+    pid = make("booking")
+    say(pid, reset=True)
+    st = say(pid, text="/start")
+    menu = st["messages"][-1]
+    st = say(pid, button={"message_id": menu["id"], "data": "haircut", "text": "Стрижка"})
+    assert bot(st)[-1] == "Как к вам обращаться?"
+    say(pid, text="Аня")
+    st = say(pid, text="пятница, 15:00")
+    assert st["keyboard"][0][0]["request_contact"]
+    st = say(pid, contact=True)
+    assert any("Вы записаны: Стрижка, пятница, 15:00" in t for t in bot(st))
+    assert any("отложено на 1 дн." in t for t in bot(st))
+    st = _wait(lambda: (lambda s: s if any(t.startswith("Напоминаем о записи: Стрижка") for t in bot(s)) else None)(
+        c.get(f"/api/projects/{pid}/bot/emulator").json()), timeout=8)
+    assert bot(say(pid, text="/my"))[-1] == "Ваша запись: Стрижка, пятница, 15:00"
+    say(pid, text="/cancel")
+    assert bot(say(pid, text="/my"))[-1] == "Записей нет. Записаться — /start"
+    # воронка тест-чата: до каждого шага дошли, счётчики есть
+    stats = c.get(f"/api/projects/{pid}/bot/stats?source=emulator").json()
+    assert stats["nodes"]["start"] == 1 and stats["nodes"]["confirm"] == 1 and stats["commands"][0][0] in ("/my", "/start")
+
+    # магазин: товар → счёт Stars → оплата → /orders
+    pid = make("shop")
+    say(pid, reset=True)
+    menu = say(pid, text="/start")["messages"][-1]
+    st = say(pid, button={"message_id": menu["id"], "data": "mug", "text": "Кружка"})
+    inv = st["messages"][-1]
+    assert inv["invoice"]["amount"] == 30 and inv["invoice"]["title"] == "Кружка"
+    st = say(pid, pay={"message_id": inv["id"]})
+    assert any(t.startswith("Спасибо! Заказ «Кружка» оплачен (30 ⭐)") for t in bot(st))
+    assert bot(say(pid, text="/orders"))[-1] == "Покупок: 1. Последняя: Кружка"
+
+    # анкета: клавиатура под полем ввода, расписание запускается вручную
+    pid = make("survey")
+    say(pid, reset=True)
+    say(pid, text="/start"); say(pid, text="Олег"); st = say(pid, text="сорок")
+    assert bot(st)[-1] == "Напишите возраст числом, например 30"
+    st = say(pid, text="40")
+    assert st["keyboard"] == [[{"text": "От друзей"}, {"text": "Поиск"}], [{"text": "Соцсети"}, {"text": "Другое"}]]
+    st = say(pid, text="Поиск")
+    assert bot(st)[-1] == "Спасибо, Олег! Анкета сохранена." and st["saved"]["source"] == "Поиск"
+    st = say(pid, run_schedule="remind")
+    assert "по расписанию" in bot(st)[-1] or "расписани" in " ".join(bot(st))
+
+    # модератор: спам удаляется
+    pid = make("moderator")
+    say(pid, reset=True)
+    st = say(pid, text="Покупайте на shop.ru", group=True, as_other=True)
+    assert [m for m in st["messages"] if m["from"] == "user"][-1]["deleted"]
+
+
+def test_delay_persisted_and_schedule_tick(tmp_path):
+    import asyncio
+    from app.bots import BotEngine, BotStore, EmulatorTransport
+    g = {"name": "s", "kind": "bot",
+         "nodes": [node("sch", "bot_schedule", kind="interval", every_minutes="1", at="10:00", weekdays=[]),
+                   node("bc", "bot_send", text="Отчёт {now}", links=[], to="role", role="all", count_var="n"),
+                   node("c", "bot_command", command="later"),
+                   node("d", "bot_delay", amount="2", unit="hours"),
+                   node("now", "bot_send", text="Напомню", links=[], to="current"),
+                   node("lt", "bot_send", text="Пора, {user_name}!", links=[], to="current")],
+         "edges": [edge("sch", "bc"), edge("c", "d"), edge("d", "now", "now"), edge("d", "lt", "later")]}
+    compiled = compile_bot(g)
+    assert compiled.schedules[0].value == "interval 1"
+
+    async def scenario():
+        store = BotStore(tmp_path / "b.json")
+        tr = EmulatorTransport()
+        eng = BotEngine("p", compiled, tr, store)
+        await eng.handle({"chat": "7", "user": {"id": 7, "name": "Ира", "username": ""}, "text": "/later"})
+        await asyncio.sleep(0.1)
+        assert [m["text"] for m in tr.messages] == ["Напомню"]
+        due = store.pending()[0]["due"]
+        assert 7190 < due - time.time() <= 7200
+        # перезапуск сервера: новое хранилище с того же файла — задача на месте и срабатывает в срок
+        store2 = BotStore(tmp_path / "b.json")
+        eng2 = BotEngine("p", compiled, tr, store2)
+        await eng2.tick(due - 10)
+        await asyncio.sleep(0.05)
+        assert [m["text"] for m in tr.messages] == ["Напомню"]
+        await eng2.tick(due + 1)
+        await asyncio.sleep(0.1)
+        assert tr.messages[-1]["text"] == "Пора, Ира!" and not store2.pending()
+        # расписание «каждую минуту»: первый тик запоминает время, через минуту — рассылка всем пользователям
+        eng2 = BotEngine("p", compiled, tr, store2)
+        t0 = time.time()
+        await eng2.tick(t0)
+        await asyncio.sleep(0.05)
+        n = len(tr.messages)
+        await eng2.tick(t0 + 61)
+        await asyncio.sleep(0.1)
+        assert tr.messages[-1]["text"].startswith("Отчёт ") and tr.messages[-1]["chat"] == "7" and len(tr.messages) == n + 1
+        await eng2.tick(t0 + 62)
+        await asyncio.sleep(0.05)
+        assert len(tr.messages) == n + 1      # не чаще раза в интервал
+
+    asyncio.run(scenario())
+
+
+def test_download_stats_export(platform, monkeypatch):
+    import base64
+    import io as _io
+
+    from app import telegram as tg
+    fake = FakeTelegram()
+    orig = fake.handler
+    csv_bytes = "имя;сумма\nАня;10\n".encode()
+
+    async def handler(request):
+        if "/file/bot" in request.url.path:
+            fake.calls.append(("FILE", request.url.path))
+            return httpx.Response(200, content=csv_bytes)
+        method = request.url.path.rsplit("/", 1)[-1]
+        if method == "getFile":
+            fake.calls.append((method, json.loads(request.content)))
+            return httpx.Response(200, json={"ok": True, "result": {"file_path": "documents/f.csv"}})
+        return await orig(request)
+
+    monkeypatch.setattr(tg, "TRANSPORT", httpx.MockTransport(handler))
+    c = platform
+    pid = c.post("/api/projects", json={"name": "Файлы", "kind": "bot"}).json()["id"]
+    g = {"name": "Файлы", "kind": "bot", "env": [{"key": "BOT_TOKEN", "value": "7:x", "secret": True}],
+         "bot": {"token_env": "BOT_TOKEN", "roles": ["moderator"], "admins": []},
+         "nodes": [node("start", "bot_command", command="start"),
+                   node("hi", "bot_send", text="Пришлите CSV", links=[], to="current"),
+                   node("f", "bot_file", kind="document", where="any", roles=[]),
+                   node("dl", "bot_download", source="file", mode="text", var="doc", max_mb="5"),
+                   node("sv", "bot_save", assignments=[{"target": "last_file", "expr": "doc['name']"}]),
+                   node("ok", "bot_send", text="{doc['name']}: {len(doc['text'])} символов, строк {len(doc['text']) - len(strip(doc['text'])) + 1}", links=[], to="current"),
+                   node("err", "bot_send", text="Ошибка: {doc['error']}", links=[], to="current")],
+         "edges": [edge("start", "hi"), edge("f", "dl"), edge("dl", "sv", "ok"), edge("sv", "ok"), edge("dl", "err", "error")]}
+    assert c.put(f"/api/projects/{pid}", json=g).status_code == 200
+    assert c.post(f"/api/projects/{pid}/bot/start").status_code == 200
+    fake.push({"message": {"message_id": 1, "chat": {"id": 7, "type": "private"}, "from": {"id": 7, "first_name": "Ира"},
+                           "text": "/start"}})
+    fake.push({"message": {"message_id": 2, "chat": {"id": 7, "type": "private"}, "from": {"id": 7, "first_name": "Ира"},
+                           "document": {"file_id": "DOC1", "file_name": "отчёт.csv", "mime_type": "text/csv",
+                                        "file_size": len(csv_bytes)}}})
+    _wait(lambda: fake.texts(7) and fake.texts(7)[-1].startswith("отчёт.csv:"))
+    assert ("getFile", {"file_id": "DOC1"}) in fake.calls and any(m == "FILE" and p.endswith("documents/f.csv") for m, p in fake.calls)
+    files = c.get(f"/api/projects/{pid}/bot/files").json()
+    assert files[0]["name"] == "отчёт.csv" and files[0]["size"] == len(csv_bytes) and files[0]["user_name"] == "Ира"
+    r = c.get(f"/api/projects/{pid}/bot/files/{files[0]['id']}")
+    assert r.status_code == 200 and r.content == csv_bytes
+
+    # статистика живого бота
+    _wait(lambda: c.get(f"/api/projects/{pid}/bot/stats").json()["users_total"] == 1)
+    st = c.get(f"/api/projects/{pid}/bot/stats").json()
+    assert st["active_today"] == 1 and st["messages_today"] == 2 and ["/start", 1] in st["commands"]
+    assert st["nodes"]["dl"] == 1 and st["days"][-1]["users"] == 1 and len(st["days"]) == 14
+
+    # выгрузка: saved-ключи — колонки
+    r = c.get(f"/api/projects/{pid}/bot/export?what=users&format=csv")
+    text = r.content.decode("utf-8-sig")
+    assert r.headers["content-disposition"].endswith('.csv"') and "last_file" in text.splitlines()[0]
+    assert "отчёт.csv" in text and "Ира" in text
+    from openpyxl import load_workbook
+    wb = load_workbook(_io.BytesIO(c.get(f"/api/projects/{pid}/bot/export?what=users&format=xlsx").content))
+    rows = list(wb.active.values)
+    assert rows[0][-1] == "last_file" and rows[1][1] == "Ира" and rows[1][-1] == "отчёт.csv"
+    assert c.get(f"/api/projects/{pid}/bot/export?what=payments&format=xlsx").status_code == 200
+    c.post(f"/api/projects/{pid}/bot/stop")
+
+    # base64 в тест-чате: файл из 📎 доходит до Python-кода
+    g2 = {**g, "nodes": [n for n in g["nodes"]], "edges": list(g["edges"])}
+    g2["nodes"][3] = node("dl", "bot_download", source="file", mode="base64", var="doc", max_mb="5")
+    g2["nodes"][5] = node("ok", "bot_send", text="{doc['name']} {doc['size']} байт", links=[], to="current")
+    data_url = "data:text/csv;base64," + base64.b64encode(csv_bytes).decode()
+    st = c.post(f"/api/projects/{pid}/bot/emulator", json={"graph": g2, "reset": True,
+                                                            "file": {"name": "a.csv", "mime": "text/csv", "size": len(csv_bytes), "data": data_url}}).json()
+    assert [m["text"] for m in st["messages"] if m["from"] == "bot"][-1] == f"a.csv {len(csv_bytes)} байт"

@@ -202,6 +202,12 @@ export default function BlockNode({ id, type, data, selected }) {
         {spec.fields ? <div className="row-line auto-summary">{autoSummary(type, data)}</div> : <Summary type={type} data={data} />}
       </div>
       {issues.length > 0 && <div className={`block-issue ${level}`}>{issues[0].message}</div>}
+      {data.__count !== undefined && (
+        <div className="block-count" title="Сколько раз дошли до этого блока">
+          <span style={{ width: `${Math.round((data.__count / data.__countMax) * 100)}%` }} />
+          <b>{data.__count}</b>
+        </div>
+      )}
       {branches
         ? branches.map((b, i) => (
             <Handle

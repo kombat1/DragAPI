@@ -27,9 +27,9 @@ import { AgentsModal, RecordModal } from './components/Automation.jsx'
 
 const BRANCH_LABELS = {
   true: 'да', false: 'нет', body: 'тело', done: 'дальше', ok: 'ответ', timeout: 'нет ответа', not_found: 'не найден',
-  paid: 'оплачено', error: 'ошибка', violation: 'нарушение',
+  paid: 'оплачено', error: 'ошибка', violation: 'нарушение', now: 'сейчас', later: 'позже',
 }
-const isStart = (t) => ['endpoint', 'trigger', 'bot_command', 'bot_message', 'bot_file', 'bot_member'].includes(t)
+const isStart = (t) => ['endpoint', 'trigger', 'bot_command', 'bot_message', 'bot_file', 'bot_member', 'bot_schedule'].includes(t)
 const SPACES = [
   ['api', '🔌 API'],
   ['automation', '🤖 Автоматизация'],
@@ -91,7 +91,8 @@ function producedFields(n) {
   if (['bot_command', 'bot_message', 'bot_file', 'bot_member'].includes(n.type))
     out.push('text', 'args', 'user_name', 'username', 'user_id', 'chat_id', 'saved', 'role', 'is_admin', 'is_group', 'is_chat_admin',
       'chat_title', 'message_id', 'file', 'reply_user_id', 'reply_user_name', 'reply_message_id')
-  if (['bot_ask', 'bot_menu', 'bot_role', 'bot_invoice', 'bot_refund', 'bot_filter', 'bot_moderate'].includes(n.type) && n.data.var) out.push(n.data.var)
+  if (['bot_ask', 'bot_menu', 'bot_role', 'bot_invoice', 'bot_refund', 'bot_filter', 'bot_moderate', 'bot_download'].includes(n.type) && n.data.var) out.push(n.data.var)
+  if (n.type === 'bot_schedule') out.push('now')
   if (n.type === 'bot_send' && n.data.to === 'role' && n.data.count_var) out.push(n.data.count_var)
   if (n.type === 'run_scenario' && n.data.target) out.push(n.data.target)
   return out
@@ -124,6 +125,7 @@ const cleanEdge = ({ selected, ...e }) => e // eslint-disable-line no-unused-var
 const BRANCHES = {
   condition: ['true', 'false'], tg_ask: ['true', 'false'], bot_ask: ['ok', 'timeout'], bot_role: ['ok', 'not_found'],
   bot_invoice: ['paid', 'timeout'], bot_refund: ['ok', 'error'], bot_filter: ['violation', 'ok'], bot_moderate: ['ok', 'error'],
+  bot_download: ['ok', 'error'], bot_delay: ['now', 'later'],
   repeat: ['body', 'done'], while: ['body', 'done'],
 }
 const branchesOf = (n) => (n.type === 'bot_menu' ? [...(n.data.buttons || []).map((b) => b.id), 'timeout'] : BRANCHES[n.type])
@@ -242,6 +244,7 @@ function Editor({ catalogs, projectId, onProjectsChanged, me }) {
   const catalog = isAuto ? catalogs.automation : isBot ? catalogs.bot : catalogs.api
   const [bot, setBot] = useState({})
   const [botState, setBotState] = useState(null) // {running, username, error}
+  const [nodeCounts, setNodeCounts] = useState(null) // воронка: {node: сколько раз дошли}
   const [automation, setAutomation] = useState({})
   const [telegram, setTelegram] = useState({})
   const [agentsOpen, setAgentsOpen] = useState(false)
@@ -305,6 +308,7 @@ function Editor({ catalogs, projectId, onProjectsChanged, me }) {
       setTelegram(p.telegram || {})
       setBot(p.bot || {})
       setBotState(null)
+      setNodeCounts(null)
       setBottomTab(p.kind === 'automation' ? 'runs' : p.kind === 'bot' ? 'emulator' : 'tests')
       setRunState(null)
       setNodes(p.nodes || [])
@@ -714,20 +718,22 @@ function Editor({ catalogs, projectId, onProjectsChanged, me }) {
           __issues: issuesByNode[n.id],
           __active: activeNodes.includes(n.id) || debugVisited.has(n.id) || runVisited.has(n.id),
           __current: runState?.status === 'running' && runState.current === n.id,
+          __count: nodeCounts ? nodeCounts[n.id] || 0 : undefined,
+          __countMax: nodeCounts ? Math.max(1, ...Object.values(nodeCounts)) : undefined,
           __step: debugStep && debugStep.node_id === n.id ? debugStep : null,
           __hiddenCount: collapse.counts[n.id],
           __toggleCollapse: isStart(n.type) ? () => toggleCollapse(n.id) : undefined,
           __run: n.type === 'trigger' && !readOnly ? () => runScenario(n.data.name) : undefined,
         },
       })),
-    [nodes, issuesByNode, activeNodes, debugVisited, debugStep, collapse, toggleCollapse, runVisited, runState, readOnly], // eslint-disable-line react-hooks/exhaustive-deps
+    [nodes, issuesByNode, activeNodes, debugVisited, debugStep, collapse, toggleCollapse, runVisited, runState, readOnly, nodeCounts], // eslint-disable-line react-hooks/exhaustive-deps
   )
 
   // подписи «да»/«нет» на связях из условия
   // «ok» у «Спросить» — «ответ», у «Назначить роль» — «готово»; «timeout» у счёта — «не оплачено»
   const branchLabel = (e) => {
     const src = nodes.find((n) => n.id === e.source)?.type
-    if (['bot_role', 'bot_refund', 'bot_moderate'].includes(src) && e.sourceHandle === 'ok') return 'готово'
+    if (['bot_role', 'bot_refund', 'bot_moderate', 'bot_download'].includes(src) && e.sourceHandle === 'ok') return 'готово'
     if (src === 'bot_filter' && e.sourceHandle === 'ok') return 'чисто'
     if (src === 'bot_invoice' && e.sourceHandle === 'timeout') return 'не оплачено'
     return BRANCH_LABELS[e.sourceHandle]
@@ -954,7 +960,11 @@ function Editor({ catalogs, projectId, onProjectsChanged, me }) {
         models={models}
         tab={bottomTab}
         setTab={setBottomTab}
-        botProps={isBot ? { graph, readOnly, running: !!botState?.running, onTrace: setActiveNodes, roles: bot.roles ?? ['moderator'] } : null}
+        botProps={
+          isBot
+            ? { graph, readOnly, running: !!botState?.running, onTrace: setActiveNodes, roles: bot.roles ?? ['moderator'], onCounts: setNodeCounts, botName: name, username: botState?.username }
+            : null
+        }
         runsProps={
           isAuto
             ? {
@@ -1102,8 +1112,8 @@ function Workspace({ me, onLogout }) {
   }, [projectId])
 
   const createProject = () => setNewOpen(true)
-  const doCreate = async (name, kind) => {
-    const p = await api.createProject(name, kind)
+  const doCreate = async (name, kind, template) => {
+    const p = await api.createProject(name, kind, template)
     await loadProjects()
     setSpace(kind)
     setProjectId(p.id)
@@ -1188,6 +1198,11 @@ function Workspace({ me, onLogout }) {
 
 function NewProjectModal({ onCreate, onClose, initialKind = 'api' }) {
   const [kind, setKind] = useState(initialKind)
+  const [templates, setTemplates] = useState([])
+  const [template, setTemplate] = useState('')
+  useEffect(() => {
+    api.botTemplates().then(setTemplates).catch(() => {})
+  }, [])
   const [name, setName] = useState('')
   const [error, setError] = useState(null)
   useEffect(() => {
@@ -1198,7 +1213,8 @@ function NewProjectModal({ onCreate, onClose, initialKind = 'api' }) {
   const submit = async (e) => {
     e.preventDefault()
     try {
-      await onCreate(name.trim() || ({ automation: 'Новый сценарий', bot: 'Новый бот' }[kind] || 'Новый проект'), kind)
+      const tpl = kind === 'bot' ? templates.find((t) => t.id === template) : null
+      await onCreate(name.trim() || tpl?.title || ({ automation: 'Новый сценарий', bot: 'Новый бот' }[kind] || 'Новый проект'), kind, kind === 'bot' ? template || null : null)
     } catch (err) {
       setError(err.message)
     }
@@ -1225,9 +1241,23 @@ function NewProjectModal({ onCreate, onClose, initialKind = 'api' }) {
             </label>
           ))}
         </div>
+        {kind === 'bot' && (
+          <div className="field">
+            <div className="field-label">С чего начать</div>
+            <div className="template-choice">
+              {[{ id: '', title: 'Пустой бот', description: 'Только /start с приветствием' }, ...templates].map((t) => (
+                <label key={t.id || 'empty'} className={`kind-card ${template === t.id ? 'on' : ''}`}>
+                  <input type="radio" name="tpl" checked={template === t.id} onChange={() => setTemplate(t.id)} />
+                  <b>{t.title}</b>
+                  <span className="muted">{t.description}</span>
+                </label>
+              ))}
+            </div>
+          </div>
+        )}
         <label className="field">
           <span className="field-label">Название</span>
-          <input autoFocus value={name} placeholder={{ automation: 'Новый сценарий', bot: 'Новый бот' }[kind] || 'Новый проект'} onChange={(e) => setName(e.target.value)} />
+          <input autoFocus value={name} placeholder={(kind === 'bot' && templates.find((t) => t.id === template)?.title) || { automation: 'Новый сценарий', bot: 'Новый бот' }[kind] || 'Новый проект'} onChange={(e) => setName(e.target.value)} />
         </label>
         {error && <div className="issue error">{error}</div>}
         <div className="modal-foot">

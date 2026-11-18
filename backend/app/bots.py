@@ -85,6 +85,18 @@ BOT_BLOCKS: dict[str, dict] = {
         "fields": [F(key="kind", label="Что прислали", kind="select", options=FILE_KINDS),
                    F(**WHERE_FIELD), F(**ROLES_FIELD)],
     },
+    "bot_schedule": {
+        "title": "По расписанию", "group": "События", "color": "#229ED9", "icon": "🕘",
+        "description": "Начало ветки по времени (бот запущен): рассылки, отчёты. Пользователя нет — шлите рассылкой или в чат по ID.",
+        "inputs": [], "output": ["flow"],
+        "defaults": {"kind": "daily", "at": "10:00", "weekdays": [], "every_minutes": "60"},
+        "fields": [F(key="kind", label="Когда", kind="select",
+                     options=[["daily", "Каждый день в…"], ["interval", "Каждые N минут"]]),
+                   F(key="at", label="Время (ЧЧ:ММ)", kind="text", show_if={"kind": ["daily"]}),
+                   F(key="weekdays", label="Дни недели", kind="weekdays", show_if={"kind": ["daily"]},
+                     hint="Ничего не выбрано — каждый день"),
+                   F(key="every_minutes", label="Каждые, минут (от 1)", kind="text", show_if={"kind": ["interval"]})],
+    },
     "bot_member": {
         "title": "Участник группы", "group": "События", "color": "#229ED9", "icon": "👥",
         "description": "Начало ветки: в группу вошёл или из неё вышел участник (бот должен быть в группе).",
@@ -150,6 +162,20 @@ BOT_BLOCKS: dict[str, dict] = {
                      hint="Кнопка под полем ввода: телефон отправляется одним нажатием"),
                    F(key="timeout", label="Ждать, с", kind="num", hint="Нет ответа — выход «нет ответа»")],
     },
+    "bot_download": {
+        "title": "Скачать файл", "group": "Сообщения", "color": "#0ea5e9", "icon": "⬇",
+        "description": "Скачать присланный файл (до 20 МБ): сохранить и/или передать содержимое в переменную.",
+        "inputs": ["flow"], "output": ["flow"],
+        "branches": [{"id": "ok", "label": "готово"}, {"id": "error", "label": "ошибка"}],
+        "defaults": {"source": "file", "mode": "base64", "var": "doc", "max_mb": "10"},
+        "fields": [F(key="source", label="Файл", kind="expr", hint="file из события или ответ «Спросить» (фото/файл)"),
+                   F(key="mode", label="Содержимое", kind="select", options=[
+                       ["save", "Только сохранить (вкладка «Файлы»)"], ["text", "Как текст (txt, csv, json)"],
+                       ["base64", "Base64 — для Python-кода (Excel, картинки…)"]]),
+                   F(key="var", label="Результат — в переменную", kind="text",
+                     hint="{id, name, size, mime, text | content_b64}. В Python: base64.b64decode(data['doc']['content_b64'])"),
+                   F(key="max_mb", label="Не больше, МБ", kind="num", optional=True)],
+    },
     "bot_menu": {
         "title": "Меню с кнопками", "group": "Сообщения", "color": "#f59e0b", "icon": "☰",
         "description": "Сообщение с кнопками: у блока столько выходов, сколько кнопок. Ждёт нажатия.",
@@ -194,6 +220,16 @@ BOT_BLOCKS: dict[str, dict] = {
                    F(key="timeout", label="Ждать оплату, с", kind="num"),
                    F(key="var", label="Платёж — в переменную", kind="text", optional=True,
                      hint="{amount, currency, charge_id}")],
+    },
+    "bot_delay": {
+        "title": "Отложить", "group": "Логика", "color": "#64748b", "icon": "⏰",
+        "description": "Выход «позже» выполнится через заданное время (напоминание), «сейчас» — сразу. Переживает перезапуск.",
+        "inputs": ["flow"], "output": ["flow"],
+        "branches": [{"id": "now", "label": "сейчас"}, {"id": "later", "label": "позже"}],
+        "defaults": {"amount": "2", "unit": "hours"},
+        "fields": [F(key="amount", label="Через", kind="num"),
+                   F(key="unit", label="Единицы", kind="select",
+                     options=[["minutes", "минут"], ["hours", "часов"], ["days", "дней"]])],
     },
     "bot_refund": {
         "title": "Вернуть Stars", "group": "Оплата", "color": "#16a34a", "icon": "↩",
@@ -316,7 +352,9 @@ BOT_BLOCKS: dict[str, dict] = {
     },
 }
 
-START_TYPES = ("bot_command", "bot_message", "bot_file", "bot_member")
+START_TYPES = ("bot_command", "bot_message", "bot_file", "bot_member", "bot_schedule")
+DELAY_UNITS = {"minutes": 60, "hours": 3600, "days": 86400}
+WEEKDAY_KEYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 
 
 def can_connect(source_type: str, target_type: str) -> bool:
@@ -385,6 +423,7 @@ class CompiledBot:
     payments_env: str = ""
     files: list[Route] = field(default_factory=list)
     members: list[Route] = field(default_factory=list)
+    schedules: list[Route] = field(default_factory=list)   # value: daily HH:MM [дни] | interval минуты
 
     @property
     def env_values(self) -> dict[str, str]:
@@ -428,6 +467,7 @@ class CompiledBot:
                for c, r in self.commands.items()]
         out += [{"node": r.node, "kind": r.kind, "value": r.value, "roles": r.roles} for r in self.messages]
         out += [{"node": r.node, "kind": "file", "value": r.value, "roles": r.roles} for r in self.files]
+        out += [{"node": r.node, "kind": "schedule", "value": r.value, "roles": []} for r in self.schedules]
         return out + [{"node": r.node, "kind": r.kind, "value": "", "roles": []} for r in self.members]
 
 
@@ -535,6 +575,10 @@ class _BotWalker(_Walker):
             if step.get("to") == "role" and str(data.get("role") or "") not in ["all", "admin", *self.roles, "user"]:
                 fail(f"неизвестная роль «{data.get('role')}»")
             step["role"] = str(data.get("role") or "")
+        if ntype == "bot_delay" and step is not None and step.get("unit") not in DELAY_UNITS:
+            fail("единицы: минуты, часы или дни")
+        if ntype == "bot_download" and step is not None and step.get("var") and (msg := _check_ident(step["var"], "переменная")):
+            fail(msg)
         if ntype == "bot_filter" and step is not None:
             step["words"] = [str(w).strip().lower() for w in data.get("words") or [] if str(w).strip()]
         if ntype == "bot_invoice" and step is not None:
@@ -621,6 +665,7 @@ def compile_bot(graph: dict) -> CompiledBot:
     messages: list[Route] = []
     files: list[Route] = []
     members: list[Route] = []
+    schedules: list[Route] = []
     code, http = {}, {}
     for nid, n in nodes.items():
         ntype, data = n.get("type"), n.get("data") or {}
@@ -652,6 +697,27 @@ def compile_bot(graph: dict) -> CompiledBot:
             else:
                 route = Route(nid, "file", kind)
                 files.append(route)
+        elif ntype == "bot_schedule":
+            kind = data.get("kind") or "daily"
+            if kind == "daily":
+                at = str(data.get("at") or "").strip()
+                if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", at):
+                    err(nid, "время: формат ЧЧ:ММ, например 09:30")
+                else:
+                    days = [d for d in data.get("weekdays") or [] if d in WEEKDAY_KEYS]
+                    route = Route(nid, "schedule", f"daily {at} {','.join(days)}".strip())
+            elif kind == "interval":
+                try:
+                    every = float(str(data.get("every_minutes")).strip())
+                    if not 1 <= every <= 7 * 1440:
+                        raise ValueError
+                    route = Route(nid, "schedule", f"interval {every:g}")
+                except ValueError:
+                    err(nid, "интервал: от 1 до 10080 минут")
+            else:
+                err(nid, "расписание: daily или interval")
+            if route is not None:
+                schedules.append(route)
         elif ntype == "bot_member":
             action = data.get("action") or "join"
             if action not in ("join", "leave"):
@@ -679,7 +745,7 @@ def compile_bot(graph: dict) -> CompiledBot:
                 messages.append(route)
         if route is not None:
             route.roles = route_roles
-            if ntype != "bot_member":
+            if ntype not in ("bot_member", "bot_schedule"):
                 route.where = data.get("where") or "any"
                 if route.where not in ("any", "private", "group"):
                     err(nid, "«Где»: any, private или group")
@@ -704,7 +770,7 @@ def compile_bot(graph: dict) -> CompiledBot:
     warnings = [i for i in issues if i.level == "warning"]
     warnings += [Issue(nid, "блок не подключён ни к одному событию — он не будет выполняться", "warning")
                  for nid in nodes if nid not in reached]
-    if not commands and not messages and not files and not members:
+    if not commands and not messages and not files and not members and not schedules:
         warnings.append(Issue(None, "нет ни одного события — бот не будет отвечать", "warning"))
     elif "start" not in commands:
         warnings.append(Issue(None, "нет ветки /start — её Telegram отправляет первой, когда пользователь "
@@ -716,7 +782,7 @@ def compile_bot(graph: dict) -> CompiledBot:
                                     "(настройки → Бот)", "warning"))
     return CompiledBot(str(graph.get("name") or ""), commands, messages, env, warnings, token_env,
                        sandbox_settings, packages, firewall, code, http, roles, admins,
-                       str(settings.get("deny_text") or "Нет доступа")[:500], payments_env, files, members)
+                       str(settings.get("deny_text") or "Нет доступа")[:500], payments_env, files, members, schedules)
 
 
 # ---------- данные пользователей ----------
@@ -734,6 +800,10 @@ class BotStore:
             except (OSError, ValueError):
                 pass
         self.data.setdefault("payments", [])
+        self.data.setdefault("stats", {"days": {}, "commands": {}, "nodes": {}})
+        self.data.setdefault("files", [])
+        self.data.setdefault("scheduled", [])
+        self.dirty = False
 
     def _save(self):
         if self.path is None:
@@ -748,8 +818,82 @@ class BotStore:
             u = self.data["users"].setdefault(str(user["id"]), {"first_seen": time.time(), "saved": {}})
             u.update(name=user.get("name", ""), username=user.get("username", ""), chat=chat, last_seen=time.time())
             u["messages"] = u.get("messages", 0) + 1
+            day = self.data["stats"]["days"].setdefault(time.strftime("%Y-%m-%d"), {"messages": 0, "users": []})
+            day["messages"] += 1
+            if str(user["id"]) not in day["users"]:
+                day["users"].append(str(user["id"]))
+            days = self.data["stats"]["days"]
+            for old in sorted(days)[:-90]:      # храним 90 дней
+                del days[old]
             self._save()
             return dict(u.get("saved") or {})
+
+    # --- статистика: сохраняется при следующем сообщении или раз в несколько секунд ---
+
+    def hit(self, kind: str, key: str):
+        with self.lock:
+            bucket = self.data["stats"][kind]
+            bucket[key] = bucket.get(key, 0) + 1
+            self.dirty = True
+
+    def flush(self):
+        with self.lock:
+            if self.dirty:
+                self.dirty = False
+                self._save()
+
+    def stats(self) -> dict:
+        with self.lock:
+            st = json.loads(json.dumps(self.data["stats"]))
+            users = list(self.data["users"].values())
+        now = time.time()
+        days = sorted(st["days"].items())
+        today = time.strftime("%Y-%m-%d")
+        week = {time.strftime("%Y-%m-%d", time.localtime(now - i * 86400)) for i in range(7)}
+        return {
+            "users_total": len(users),
+            "new_today": sum(1 for u in users if u.get("first_seen", 0) >= now - 86400),
+            "active_today": len(st["days"].get(today, {}).get("users", [])),
+            "active_week": len({uid for d, v in days if d in week for uid in v["users"]}),
+            "messages_today": st["days"].get(today, {}).get("messages", 0),
+            "days": [{"date": time.strftime("%Y-%m-%d", time.localtime(now - i * 86400)),
+                      "users": len(st["days"].get(time.strftime("%Y-%m-%d", time.localtime(now - i * 86400)), {}).get("users", [])),
+                      "messages": st["days"].get(time.strftime("%Y-%m-%d", time.localtime(now - i * 86400)), {}).get("messages", 0)}
+                     for i in range(13, -1, -1)],
+            "commands": sorted(st["commands"].items(), key=lambda x: -x[1])[:20],
+            "nodes": st["nodes"],
+        }
+
+    # --- файлы ---
+
+    def add_file(self, record: dict):
+        with self.lock:
+            self.data["files"].append(record)
+            del self.data["files"][:-500]
+            self._save()
+
+    def files(self) -> list[dict]:
+        with self.lock:
+            return list(reversed(self.data["files"]))
+
+    # --- отложенные ветки ---
+
+    def schedule(self, item: dict):
+        with self.lock:
+            self.data["scheduled"].append(item)
+            self._save()
+
+    def take_due(self, now: float) -> list[dict]:
+        with self.lock:
+            due = [x for x in self.data["scheduled"] if x["due"] <= now]
+            if due:
+                self.data["scheduled"] = [x for x in self.data["scheduled"] if x["due"] > now]
+                self._save()
+            return due
+
+    def pending(self) -> list[dict]:
+        with self.lock:
+            return [{k: v for k, v in x.items() if k in ("id", "due", "node", "chat")} for x in self.data["scheduled"]]
 
     def save(self, user_id, values: dict):
         with self.lock:
@@ -827,7 +971,8 @@ class BotStore:
 
     def clear(self):
         with self.lock:
-            self.data = {"users": {}, "payments": []}
+            self.data = {"users": {}, "payments": [], "stats": {"days": {}, "commands": {}, "nodes": {}},
+                         "files": [], "scheduled": []}
             self._save()
 
 
@@ -858,8 +1003,12 @@ class EmulatorTransport:
     async def send(self, chat, text, buttons=None, links=None, keyboard=None, remove_keyboard=False, columns=1):
         if keyboard is not None or remove_keyboard:
             self.keyboard = keyboard   # клавиатура под полем ввода тест-чата
+        try:
+            cols = max(1, min(int(float(columns or 1)), 8))
+        except (TypeError, ValueError):
+            cols = 1
         return self._add({"from": "bot", "chat": str(chat), "text": text, "buttons": buttons or [],
-                          "links": links or []})
+                          "links": links or [], "columns": cols})
 
     async def send_file(self, chat, media, caption):
         return self._add({"from": "bot", "chat": str(chat), "media": media, "text": caption or ""})
@@ -882,6 +1031,16 @@ class EmulatorTransport:
 
     async def refund(self, user_id, charge_id):
         self.system(f"↩ возврат Stars: {charge_id}")
+
+    async def download(self, media: dict, max_bytes: int) -> bytes:
+        import base64
+        data = media.get("data") or media.get("preview") or ""
+        if not data.startswith("data:"):
+            raise_tg("в тест-чате содержимое есть только у файлов до 2 МБ, прикреплённых через 📎")
+        raw = base64.b64decode(data.split(",", 1)[1])
+        if len(raw) > max_bytes:
+            raise_tg(f"файл больше {max_bytes // 1048576} МБ")
+        return raw
 
     async def photo(self, chat, url, caption):
         return self._add({"from": "bot", "chat": str(chat), "photo": url, "text": caption})
@@ -964,6 +1123,32 @@ class TelegramTransport:
     async def refund(self, user_id, charge_id):
         await self._call("refundStarPayment", user_id=int(user_id), telegram_payment_charge_id=charge_id)
 
+    async def download(self, media: dict, max_bytes: int) -> bytes:
+        """getFile → https://api.telegram.org/file/bot<token>/<path>. Bot API отдаёт файлы до 20 МБ."""
+        import httpx
+
+        from . import telegram as tg
+        if media.get("size") and media["size"] > max_bytes:
+            raise_tg(f"файл больше {max_bytes // 1048576} МБ")
+        f = await self._call("getFile", file_id=media["file_id"])
+        path = (f or {}).get("file_path") if isinstance(f, dict) else None
+        if not path:
+            raise_tg("Telegram не отдал файл (больше 20 МБ?)")
+        try:
+            async with httpx.AsyncClient(timeout=60, transport=tg.TRANSPORT) as client:
+                async with client.stream("GET", f"{tg.API_BASE}/file/bot{self.token}/{path}") as r:
+                    if r.status_code != 200:
+                        raise_tg(f"скачивание: ответ {r.status_code}")
+                    chunks, total = [], 0
+                    async for chunk in r.aiter_bytes():
+                        total += len(chunk)
+                        if total > max_bytes:
+                            raise_tg(f"файл больше {max_bytes // 1048576} МБ")
+                        chunks.append(chunk)
+        except httpx.HTTPError as e:
+            raise_tg(f"скачивание: {type(e).__name__}")
+        return b"".join(chunks)
+
     async def photo(self, chat, url, caption):
         m = await self._call("sendPhoto", chat_id=chat, photo=url, caption=(caption or "")[:1024] or None)
         return m.get("message_id") if isinstance(m, dict) else None
@@ -1006,6 +1191,16 @@ class TelegramTransport:
                              scope={"type": "chat", "chat_id": chat_id} if chat_id else None)
         except TelegramError:
             pass
+
+
+def _human(seconds: float) -> str:
+    if seconds >= 86400:
+        return f"{seconds / 86400:g} дн."
+    if seconds >= 3600:
+        return f"{seconds / 3600:g} ч"
+    if seconds >= 60:
+        return f"{seconds / 60:g} мин"
+    return f"{seconds:g} с"
 
 
 def _rows(buttons: list, columns) -> list[list]:
@@ -1060,6 +1255,9 @@ class BotEngine:
         self.stats = {"in": 0, "out": 0, "errors": 0}
         self.flood: dict[str, deque] = {}
         self.admin_cache: dict[str, tuple[float, bool]] = {}
+        self.fast_delays = False       # тест-чат: «позже» — через несколько секунд
+        self.files_dir: Path | None = None
+        self.fired: dict[str, str] = {}   # расписания: последний запуск (чтобы не повторять в ту же минуту)
 
     def event(self, kind, chat, text, node=None, user=None):
         self.log.appendleft({"t": time.time(), "kind": kind, "chat": str(chat), "user": user, "text": str(text)[:500],
@@ -1167,10 +1365,14 @@ class BotEngine:
             return
         await self._start(route, upd, chat, user, key, saved, role, chat_type, str(upd.get("text") or ""), "")
 
-    async def _run(self, route: Route, ctx: dict, key: str):
+    async def _run(self, route: Route, ctx: dict, key: str, steps: list | None = None):
         self.busy += 1
         try:
-            await self.block(route.steps, ctx, key)
+            if steps is None:
+                self.store.hit("nodes", route.node)
+                if route.kind == "command":
+                    self.store.hit("commands", "/" + route.value)
+            await self.block(route.steps if steps is None else steps, ctx, key)
         except (_Stop, asyncio.CancelledError):
             pass
         except FlowError as e:
@@ -1183,6 +1385,53 @@ class BotEngine:
     def stop(self):
         for t in list(self.tasks):
             t.cancel()
+
+    # --- время: отложенные ветки и расписания ---
+
+    def _spawn_run(self, route, ctx, key, steps=None):
+        task = asyncio.ensure_future(self._run(route, ctx, key, steps))
+        self.tasks.add(task)
+        task.add_done_callback(self.tasks.discard)
+
+    async def tick(self, now: float, schedules: bool = True):
+        for item in self.store.take_due(now):
+            ctx = item.get("ctx") or {}
+            if ctx.get("user_id"):     # к моменту напоминания данные пользователя могли измениться
+                ctx["saved"] = (self.store.data["users"].get(str(ctx["user_id"])) or {}).get("saved", ctx.get("saved", {}))
+                ctx["role"] = self.store.role(ctx["user_id"], self.compiled.admins)
+            self.event("in", item.get("chat") or "", "[⏰ отложенная ветка]", item.get("node"))
+            self._spawn_run(Route(item.get("node"), "delay"), ctx, item.get("key") or "", item.get("steps") or [])
+        if not schedules:
+            return
+        local = time.localtime(now)
+        minute = time.strftime("%Y-%m-%d %H:%M", local)
+        for r in self.compiled.schedules:
+            parts = r.value.split()
+            due = False
+            if parts[0] == "daily":
+                days = parts[2].split(",") if len(parts) > 2 else []
+                due = time.strftime("%H:%M", local) == parts[1] and (not days or WEEKDAY_KEYS[local.tm_wday] in days)
+                stamp = minute
+            else:
+                period = float(parts[1]) * 60
+                last = float(self.fired.get(r.node, "0") or 0)
+                due = last and now - last >= period
+                stamp = str(now)
+                if not last:
+                    self.fired[r.node] = str(now)   # первый запуск — через интервал после старта
+            if due and self.fired.get(r.node) != stamp:
+                self.fired[r.node] = stamp
+                self.run_schedule(r)
+        self.store.flush()
+
+    def run_schedule(self, route: Route, chat: str = ""):
+        """Ветка расписания: без пользователя (chat пуст — «в этот чат» недоступно)."""
+        ctx = {"text": "", "args": "", "chat_id": chat, "user_id": "", "user_name": "", "username": "",
+               "saved": {}, "role": "admin", "is_admin": True, "chat_type": "private", "is_group": False,
+               "chat_title": "", "message_id": None, "file": None, "reply_user_id": None, "reply_user_name": None,
+               "reply_message_id": None, "is_chat_admin": False, "now": time.strftime("%Y-%m-%d %H:%M")}
+        self.event("in", chat or "—", f"[🕘 расписание {route.value}]", route.node)
+        self._spawn_run(route, ctx, f"schedule:{route.node}")
 
     # --- оплата ---
 
@@ -1246,6 +1495,8 @@ class BotEngine:
                 del self.waiters[key]
 
     async def _send(self, chat, text, node, **kw):
+        if not chat:
+            raise FlowError(node, "у этой ветки нет текущего чата (расписание) — отправляйте рассылкой или в чат по ID")
         kw = {k: v for k, v in kw.items() if v is not None}
         from .telegram import TelegramError
         try:
@@ -1259,6 +1510,7 @@ class BotEngine:
         for s in steps:
             node, op = s["node"], s["op"]
             chat = ctx["chat_id"]
+            self.store.hit("nodes", node)   # воронка: сколько раз дошли до блока
             if op == "bot_send":
                 text = self._text(s["text"], ctx, node, "текст")
                 to = s.get("to") or "current"
@@ -1364,6 +1616,60 @@ class BotEngine:
                 if s.get("var"):
                     ctx[s["var"]] = error
                 await self.block(s["branches"]["error" if error else "ok"], ctx, key)
+                return
+            elif op == "bot_delay":
+                seconds = self._num(s.get("amount"), ctx, node, "через", 1) * DELAY_UNITS[s.get("unit") or "hours"]
+                if seconds <= 0:
+                    raise FlowError(node, "время должно быть больше нуля")
+                if seconds > 366 * 86400:
+                    raise FlowError(node, "не дольше года")
+                wait = min(seconds, 3) if self.fast_delays else seconds
+                later = s["branches"].get("later") or []
+                if later:
+                    self.store.schedule({"id": uuid.uuid4().hex[:10], "due": time.time() + wait, "node": node,
+                                         "chat": chat, "key": key, "steps": later, "ctx": jsonable(ctx)})
+                    note = f"⏰ отложено на {_human(seconds)}" + (
+                        f" (в тест-чате — через {_human(wait)})" if self.fast_delays else "")
+                    self.event("out", chat, note, node)
+                    if self.fast_delays and hasattr(self.transport, "system"):
+                        self.transport.system(note)
+                await self.block(s["branches"].get("now") or [], ctx, key)
+                return
+            elif op == "bot_download":
+                from .telegram import TelegramError
+                media = self._ev(s.get("source") or "file", ctx, node, "файл")
+                if not isinstance(media, dict) or not media.get("file_id"):
+                    raise FlowError(node, "нет файла: в переменной должен быть файл из события или ответа «Спросить»")
+                max_bytes = int(min(self._num(s.get("max_mb"), ctx, node, "размер", 10), 20) * 1048576)
+                try:
+                    raw = await self.transport.download(media, max_bytes)
+                except TelegramError as e:
+                    if s.get("var"):
+                        ctx[s["var"]] = {"error": str(e)}
+                    await self.block(s["branches"]["error"], ctx, key)
+                    return
+                fid = uuid.uuid4().hex[:12]
+                name = re.sub(r"[^\w.\-]+", "_", str(media.get("name") or "file"))[:100] or "file"
+                if self.files_dir is not None:
+                    self.files_dir.mkdir(parents=True, exist_ok=True)
+                    (self.files_dir / f"{fid}_{name}").write_bytes(raw)
+                record = {"id": fid, "name": name, "size": len(raw), "mime": media.get("mime"), "kind": media.get("kind"),
+                          "user_id": ctx.get("user_id"), "user_name": ctx.get("user_name"), "t": time.time(),
+                          "stored": self.files_dir is not None}
+                self.store.add_file(record)
+                result = {k: record[k] for k in ("id", "name", "size", "mime", "kind")}
+                mode = s.get("mode") or "base64"
+                if mode == "text":
+                    result["text"] = raw[:1_000_000].decode("utf-8", "replace")
+                elif mode == "base64":
+                    import base64
+                    if len(raw) > 5 * 1048576:
+                        raise FlowError(node, "для передачи в код файл должен быть не больше 5 МБ")
+                    result["content_b64"] = base64.b64encode(raw).decode("ascii")
+                if s.get("var"):
+                    ctx[s["var"]] = result
+                self.event("out", chat, f"[скачан] {name} ({len(raw) // 1024} КБ)", node)
+                await self.block(s["branches"]["ok"], ctx, key)
                 return
             elif op == "bot_photo":
                 from .telegram import TelegramError
@@ -1731,6 +2037,7 @@ class BotManager:
             raise ValueError(f"Telegram: {e}") from None
         await self.stop(pid, persist=False)
         engine = BotEngine(pid, compiled, TelegramTransport(token), BotStore(BOTS_DIR / f"{pid}.json"), self.hub)
+        engine.files_dir = BOTS_DIR / pid / "files"
         bot = LiveBot(pid, engine, token, me.get("username") or "")
         self.live[pid] = bot
         bot.task = asyncio.ensure_future(self._poll(bot))
@@ -1816,6 +2123,22 @@ class BotManager:
                 print(f"DragAPI: бот проекта {pid} не запущен: {e}")
         self._persist()
 
+    async def scheduler(self):
+        """Раз в секунду: отложенные ветки (боты и тест-чаты) и расписания (только работающие боты)."""
+        while True:
+            now = time.time()
+            for bot in list(self.live.values()):
+                try:
+                    await bot.engine.tick(now)
+                except Exception as e:  # noqa: BLE001
+                    bot.engine.event("error", "", f"планировщик: {e}")
+            for eng in list(self.emulators.values()):
+                try:
+                    await eng.tick(now, schedules=False)
+                except Exception as e:  # noqa: BLE001
+                    eng.event("error", "", f"планировщик: {e}")
+            await asyncio.sleep(1)
+
     def stop_all(self):
         for bot in self.live.values():
             if bot.task:
@@ -1831,6 +2154,7 @@ class BotManager:
             if eng:
                 eng.stop()
             eng = BotEngine(pid, compiled, EmulatorTransport(), BotStore(None), self.hub)
+            eng.fast_delays = True
             self.emulators[pid] = eng
         eng.compiled = compiled
         return eng
