@@ -46,6 +46,11 @@ CURRENCIES = [["XTR", "⭐ Telegram Stars"], ["RUB", "RUB — рубли"], ["US
 ROLES_FIELD = dict(key="roles", label="Доступна ролям", kind="roles", optional=True,
                    hint="Пусто — всем. Администраторы проходят всегда. Остальным бот ответит текстом из настроек.")
 
+WHERE_FIELD = dict(key="where", label="Где", kind="select",
+                   options=[["any", "В личке и в группах"], ["private", "Только в личке"], ["group", "Только в группах"]])
+FILE_KINDS = [["any", "Любой файл"], ["photo", "Фото"], ["document", "Документ"], ["video", "Видео"],
+              ["voice", "Голосовое"], ["audio", "Аудио"]]
+
 ROUTE_OPTS = [["any", "Любое сообщение"], ["equals", "Текст равен"], ["contains", "Текст содержит"],
               ["regex", "Регулярное выражение"]]
 
@@ -58,7 +63,7 @@ BOT_BLOCKS: dict[str, dict] = {
         "fields": [F(key="command", label="Команда (без /)", kind="text",
                      hint="Латиница в нижнем регистре, цифры и _. Появится в меню бота."),
                    F(key="description", label="Описание в меню", kind="text", optional=True),
-                   F(**ROLES_FIELD)],
+                   F(**WHERE_FIELD), F(**ROLES_FIELD)],
     },
     "bot_message": {
         "title": "Сообщение", "group": "События", "color": "#229ED9", "icon": "✉",
@@ -70,7 +75,23 @@ BOT_BLOCKS: dict[str, dict] = {
                      show_if={"match": ["equals", "contains", "regex"]}),
                    F(key="ignore_case", label="Без учёта регистра", kind="bool",
                      show_if={"match": ["equals", "contains", "regex"]}),
-                   F(**ROLES_FIELD)],
+                   F(**WHERE_FIELD), F(**ROLES_FIELD)],
+    },
+    "bot_file": {
+        "title": "Файл или фото", "group": "События", "color": "#229ED9", "icon": "📎",
+        "description": "Начало ветки: пользователь прислал фото, документ, видео или голосовое. Сведения — в file.",
+        "inputs": [], "output": ["flow"],
+        "defaults": {"kind": "any", "where": "any", "roles": []},
+        "fields": [F(key="kind", label="Что прислали", kind="select", options=FILE_KINDS),
+                   F(**WHERE_FIELD), F(**ROLES_FIELD)],
+    },
+    "bot_member": {
+        "title": "Участник группы", "group": "События", "color": "#229ED9", "icon": "👥",
+        "description": "Начало ветки: в группу вошёл или из неё вышел участник (бот должен быть в группе).",
+        "inputs": [], "output": ["flow"],
+        "defaults": {"action": "join"},
+        "fields": [F(key="action", label="Событие", kind="select",
+                     options=[["join", "Вошёл новый участник"], ["leave", "Участник вышел"]])],
     },
     "bot_send": {
         "title": "Отправить сообщение", "group": "Сообщения", "color": "#0ea5e9", "icon": "💬",
@@ -97,19 +118,36 @@ BOT_BLOCKS: dict[str, dict] = {
         "fields": [F(key="url", label="Адрес картинки", kind="template"),
                    F(key="caption", label="Подпись", kind="template", optional=True)],
     },
+    "bot_send_file": {
+        "title": "Отправить файл", "group": "Сообщения", "color": "#0ea5e9", "icon": "📤",
+        "description": "Переслать полученное фото или файл — в этот чат, админу или рассылкой по роли.",
+        "inputs": ["flow"], "output": ["flow"],
+        "defaults": {"source": "file", "caption": "", "to": "chat", "chat": "", "role": "admin"},
+        "fields": [F(key="source", label="Файл", kind="expr",
+                     hint="Переменная с файлом: file (из события) или ответ блока «Спросить» с типом «фото/файл»"),
+                   F(key="caption", label="Подпись", kind="template", optional=True),
+                   F(key="to", label="Кому", kind="select", options=[
+                       ["current", "В этот чат"], ["chat", "В чат по ID"], ["role", "Всем с ролью"]]),
+                   F(key="chat", label="ID чата (или {выражение})", kind="template", show_if={"to": ["chat"]}),
+                   F(key="role", label="Роль получателей", kind="role_any", show_if={"to": ["role"]})],
+    },
     "bot_ask": {
         "title": "Спросить", "group": "Сообщения", "color": "#f59e0b", "icon": "❔",
         "description": "Задать вопрос и дождаться ответа текстом — он попадёт в переменную.",
         "inputs": ["flow"], "output": ["flow"],
         "branches": [{"id": "ok", "label": "ответ"}, {"id": "timeout", "label": "нет ответа"}],
         "defaults": {"text": "Как вас зовут?", "var": "answer", "type": "text",
-                     "retry": "Нужно число — попробуйте ещё раз", "timeout": "3600"},
+                     "retry": "Не то — попробуйте ещё раз", "timeout": "3600",
+                     "button": "📱 Поделиться номером"},
         "fields": [F(key="text", label="Вопрос", kind="template", multiline=True),
                    F(key="var", label="Ответ — в переменную", kind="text"),
                    F(key="type", label="Ожидаем", kind="select",
-                     options=[["text", "Любой текст"], ["number", "Число"], ["int", "Целое число"]]),
+                     options=[["text", "Любой текст"], ["number", "Число"], ["int", "Целое число"],
+                              ["photo", "Фото"], ["file", "Файл или фото"], ["contact", "Номер телефона (кнопка)"]]),
                    F(key="retry", label="Если ответ не подходит", kind="template",
-                     show_if={"type": ["number", "int"]}),
+                     show_if={"type": ["number", "int", "photo", "file", "contact"]}),
+                   F(key="button", label="Текст кнопки", kind="text", show_if={"type": ["contact"]},
+                     hint="Кнопка под полем ввода: телефон отправляется одним нажатием"),
                    F(key="timeout", label="Ждать, с", kind="num", hint="Нет ответа — выход «нет ответа»")],
     },
     "bot_menu": {
@@ -119,9 +157,12 @@ BOT_BLOCKS: dict[str, dict] = {
         "dynamic_branches": {"field": "buttons", "extra": [{"id": "timeout", "label": "нет ответа"}]},
         "defaults": {"text": "Что вас интересует?", "buttons": [{"id": "b1", "text": "Цены"},
                                                                {"id": "b2", "text": "Контакты"}],
-                     "var": "choice", "timeout": "3600", "remove": True},
+                     "var": "choice", "timeout": "3600", "remove": True, "keyboard": "inline", "columns": "1"},
         "fields": [F(key="text", label="Текст", kind="template", multiline=True),
                    F(key="buttons", label="Кнопки (каждая — свой выход)", kind="buttons"),
+                   F(key="keyboard", label="Вид кнопок", kind="select",
+                     options=[["inline", "Под сообщением"], ["reply", "Клавиатура под полем ввода"]]),
+                   F(key="columns", label="Кнопок в ряду", kind="num", optional=True),
                    F(key="var", label="Нажатая кнопка (текст) — в переменную", kind="text", optional=True),
                    F(key="remove", label="Убрать кнопки после нажатия", kind="bool"),
                    F(key="timeout", label="Ждать, с", kind="num")],
@@ -153,6 +194,52 @@ BOT_BLOCKS: dict[str, dict] = {
                    F(key="timeout", label="Ждать оплату, с", kind="num"),
                    F(key="var", label="Платёж — в переменную", kind="text", optional=True,
                      hint="{amount, currency, charge_id}")],
+    },
+    "bot_refund": {
+        "title": "Вернуть Stars", "group": "Оплата", "color": "#16a34a", "icon": "↩",
+        "description": "Возврат оплаты звёздами (refundStarPayment). Выходы «готово» и «ошибка».",
+        "inputs": ["flow"], "output": ["flow"],
+        "branches": [{"id": "ok", "label": "готово"}, {"id": "error", "label": "ошибка"}],
+        "defaults": {"charge_id": "payment['charge_id']", "user": "user_id", "var": "refund_error"},
+        "fields": [F(key="charge_id", label="ID платежа Telegram", kind="expr",
+                     hint="payment['charge_id'] после «Счёта» или сохранённый ID"),
+                   F(key="user", label="Кто платил (ID)", kind="expr"),
+                   F(key="var", label="Текст ошибки — в переменную", kind="text", optional=True)],
+    },
+    "bot_filter": {
+        "title": "Антиспам", "group": "Модерация", "color": "#dc2626", "icon": "🧹",
+        "description": "Проверить сообщение: ссылки, стоп-слова, капс, длина, флуд. Выходы «нарушение» и «чисто».",
+        "inputs": ["flow"], "output": ["flow"],
+        "branches": [{"id": "violation", "label": "нарушение"}, {"id": "ok", "label": "чисто"}],
+        "defaults": {"links": True, "words": ["казино", "заработок без вложений"], "caps": True, "max_length": "0",
+                     "flood_count": "5", "flood_seconds": "10", "skip_admins": True, "var": "reason"},
+        "fields": [F(key="links", label="Запрещать ссылки и @упоминания каналов", kind="bool"),
+                   F(key="words", label="Стоп-слова", kind="strings", hint="Через запятую, без учёта регистра"),
+                   F(key="caps", label="Запрещать КАПС (больше 70% заглавных)", kind="bool"),
+                   F(key="max_length", label="Максимальная длина (0 — без ограничения)", kind="num", optional=True),
+                   F(key="flood_count", label="Флуд: больше N сообщений…", kind="num", optional=True),
+                   F(key="flood_seconds", label="…за M секунд", kind="num", optional=True),
+                   F(key="skip_admins", label="Не проверять админов (бота и группы)", kind="bool"),
+                   F(key="var", label="Причина — в переменную", kind="text", optional=True)],
+    },
+    "bot_moderate": {
+        "title": "Модерация", "group": "Модерация", "color": "#dc2626", "icon": "🛡",
+        "description": "Удалить сообщение, замьютить, забанить, выгнать или разбанить участника группы.",
+        "inputs": ["flow"], "output": ["flow"],
+        "branches": [{"id": "ok", "label": "готово"}, {"id": "error", "label": "ошибка"}],
+        "defaults": {"action": "delete", "target": "author", "target_id": "", "minutes": "60", "var": "mod_error"},
+        "fields": [F(key="action", label="Действие", kind="select", options=[
+                       ["delete", "Удалить сообщение"], ["mute", "Замьютить (только чтение)"], ["unmute", "Снять мьют"],
+                       ["ban", "Забанить"], ["unban", "Разбанить"], ["kick", "Выгнать (сможет вернуться)"]]),
+                   F(key="target", label="Кого", kind="select", options=[
+                       ["author", "Автора этого сообщения"], ["reply", "Того, на чьё сообщение ответили"],
+                       ["id", "По ID пользователя"]]),
+                   F(key="target_id", label="ID пользователя", kind="template", show_if={"target": ["id"]},
+                     hint="Например {args} в «/ban 123456»"),
+                   F(key="minutes", label="На сколько минут (0 — навсегда)", kind="num",
+                     show_if={"action": ["mute", "ban"]}),
+                   F(key="var", label="Текст ошибки — в переменную", kind="text", optional=True,
+                     hint="Например, у бота нет прав администратора в группе")],
     },
     "condition": {
         "title": "Условие", "group": "Логика", "color": "#ec4899", "icon": "◇",
@@ -229,7 +316,7 @@ BOT_BLOCKS: dict[str, dict] = {
     },
 }
 
-START_TYPES = ("bot_command", "bot_message")
+START_TYPES = ("bot_command", "bot_message", "bot_file", "bot_member")
 
 
 def can_connect(source_type: str, target_type: str) -> bool:
@@ -262,6 +349,11 @@ class Route:
     description: str = ""
     steps: list[dict] = field(default_factory=list)
     roles: list[str] = field(default_factory=list)
+    where: str = "any"
+
+    def fits(self, chat_type: str) -> bool:
+        group = chat_type in ("group", "supergroup")
+        return self.where == "any" or (self.where == "group") == group
 
     def matches(self, text: str) -> bool:
         t, v = (text.lower(), self.value.lower()) if self.ignore_case else (text, self.value)
@@ -291,6 +383,8 @@ class CompiledBot:
     admins: list[str] = field(default_factory=list)                    # ID администраторов из настроек
     deny_text: str = "Нет доступа"
     payments_env: str = ""
+    files: list[Route] = field(default_factory=list)
+    members: list[Route] = field(default_factory=list)
 
     @property
     def env_values(self) -> dict[str, str]:
@@ -307,24 +401,34 @@ class CompiledBot:
     def all_roles(self) -> list[str]:
         return ["admin", *self.roles, "user", "banned"]
 
-    def route(self, text: str) -> tuple[Route | None, str]:
-        """Ветка для текста: команда, затем «равен», «содержит»/регулярка, «любое». -> (ветка, args)."""
+    def route(self, text: str, chat_type: str = "private", media: dict | None = None,
+              member: str | None = None) -> tuple[Route | None, str]:
+        """Ветка для входящего: участник группы → файл → команда → «равен» → «содержит»/регулярка → «любое»."""
+        if member:
+            return next((r for r in self.members if r.kind == member), None), ""
+        if media:
+            for r in sorted(self.files, key=lambda r: r.value == "any"):
+                if r.fits(chat_type) and r.value in ("any", media.get("kind")):
+                    return r, ""
+            return None, ""
         text = text or ""
         if text.startswith("/"):
             head, _, rest = text[1:].partition(" ")
             cmd = head.split("@", 1)[0].lower()
-            if cmd in self.commands:
+            if cmd in self.commands and self.commands[cmd].fits(chat_type):
                 return self.commands[cmd], rest.strip()
         order = {"equals": 0, "contains": 1, "regex": 1, "any": 2}
         for r in sorted(self.messages, key=lambda r: order[r.kind]):
-            if r.matches(text):
+            if r.fits(chat_type) and r.matches(text):
                 return r, ""
         return None, ""
 
     def summary(self) -> list[dict]:
         out = [{"node": r.node, "kind": "command", "value": c, "description": r.description, "roles": r.roles}
                for c, r in self.commands.items()]
-        return out + [{"node": r.node, "kind": r.kind, "value": r.value, "roles": r.roles} for r in self.messages]
+        out += [{"node": r.node, "kind": r.kind, "value": r.value, "roles": r.roles} for r in self.messages]
+        out += [{"node": r.node, "kind": "file", "value": r.value, "roles": r.roles} for r in self.files]
+        return out + [{"node": r.node, "kind": r.kind, "value": "", "roles": []} for r in self.members]
 
 
 class _BotWalker(_Walker):
@@ -424,6 +528,15 @@ class _BotWalker(_Walker):
             if role not in [*self.roles, "user", "banned"]:
                 fail("роль: одна из ролей проекта, user (снять) или banned. Администраторы задаются в настройках")
             step["role"] = role
+        if ntype == "bot_menu" and step is not None and step.get("keyboard") == "reply":
+            if len({b["text"].lower() for b in step.get("buttons", [])}) != len(step.get("buttons", [])):
+                fail("у кнопок клавиатуры должны быть разные тексты — ответ приходит текстом кнопки")
+        if ntype == "bot_send_file" and step is not None:
+            if step.get("to") == "role" and str(data.get("role") or "") not in ["all", "admin", *self.roles, "user"]:
+                fail(f"неизвестная роль «{data.get('role')}»")
+            step["role"] = str(data.get("role") or "")
+        if ntype == "bot_filter" and step is not None:
+            step["words"] = [str(w).strip().lower() for w in data.get("words") or [] if str(w).strip()]
         if ntype == "bot_invoice" and step is not None:
             if step.get("currency") != "XTR" and not self.payments:
                 fail("оплата в валюте требует токен платёжного провайдера (настройки → Бот); Stars работают без него")
@@ -506,6 +619,8 @@ def compile_bot(graph: dict) -> CompiledBot:
     reached: set[str] = set()
     commands: dict[str, Route] = {}
     messages: list[Route] = []
+    files: list[Route] = []
+    members: list[Route] = []
     code, http = {}, {}
     for nid, n in nodes.items():
         ntype, data = n.get("type"), n.get("data") or {}
@@ -528,6 +643,24 @@ def compile_bot(graph: dict) -> CompiledBot:
             else:
                 route = Route(nid, "command", cmd, description=str(data.get("description") or "")[:250])
                 commands[cmd] = route
+        elif ntype == "bot_file":
+            kind = data.get("kind") or "any"
+            if kind not in [k for k, _ in FILE_KINDS]:
+                err(nid, f"неизвестный вид файла «{kind}»")
+            elif any(r.value == kind and r.where == (data.get("where") or "any") for r in files):
+                err(nid, "такое событие «Файл» уже есть")
+            else:
+                route = Route(nid, "file", kind)
+                files.append(route)
+        elif ntype == "bot_member":
+            action = data.get("action") or "join"
+            if action not in ("join", "leave"):
+                err(nid, "событие участника: join или leave")
+            elif any(r.kind == action for r in members):
+                err(nid, "такое событие участника уже есть")
+            else:
+                route = Route(nid, action, where="group")
+                members.append(route)
         else:
             match = data.get("match") or "any"
             pattern = str(data.get("pattern") or "")
@@ -546,6 +679,10 @@ def compile_bot(graph: dict) -> CompiledBot:
                 messages.append(route)
         if route is not None:
             route.roles = route_roles
+            if ntype != "bot_member":
+                route.where = data.get("where") or "any"
+                if route.where not in ("any", "private", "group"):
+                    err(nid, "«Где»: any, private или group")
         walker = _BotWalker(nodes, outgoing, reached, err, warn, roles, bool(payments_env))
         steps = walker.walk(outgoing.get((nid, None)), frozenset({nid}))
         if route is not None and steps is not None and walker.ok:
@@ -567,7 +704,7 @@ def compile_bot(graph: dict) -> CompiledBot:
     warnings = [i for i in issues if i.level == "warning"]
     warnings += [Issue(nid, "блок не подключён ни к одному событию — он не будет выполняться", "warning")
                  for nid in nodes if nid not in reached]
-    if not commands and not messages:
+    if not commands and not messages and not files and not members:
         warnings.append(Issue(None, "нет ни одного события — бот не будет отвечать", "warning"))
     elif "start" not in commands:
         warnings.append(Issue(None, "нет ветки /start — её Telegram отправляет первой, когда пользователь "
@@ -579,7 +716,7 @@ def compile_bot(graph: dict) -> CompiledBot:
                                     "(настройки → Бот)", "warning"))
     return CompiledBot(str(graph.get("name") or ""), commands, messages, env, warnings, token_env,
                        sandbox_settings, packages, firewall, code, http, roles, admins,
-                       str(settings.get("deny_text") or "Нет доступа")[:500], payments_env)
+                       str(settings.get("deny_text") or "Нет доступа")[:500], payments_env, files, members)
 
 
 # ---------- данные пользователей ----------
@@ -675,6 +812,15 @@ class BotStore:
             self.data["payments"].append(record)
             self._save()
 
+    def mark_refunded(self, charge_id: str) -> bool:
+        with self.lock:
+            for p in self.data["payments"]:
+                if p.get("charge_id") == charge_id:
+                    p["refunded"] = time.time()
+                    self._save()
+                    return True
+        return False
+
     def payments(self) -> list[dict]:
         with self.lock:
             return list(reversed(self.data["payments"]))
@@ -693,6 +839,8 @@ class EmulatorTransport:
     def __init__(self):
         self.messages: list[dict] = []
         self.seq = 0
+        self.keyboard = None          # текущая клавиатура под полем ввода
+        self.chat_admins: dict[str, str] = {}
 
     def _add(self, msg):
         self.seq += 1
@@ -701,12 +849,39 @@ class EmulatorTransport:
         del self.messages[:-300]
         return self.seq
 
-    def user_message(self, text):
-        return self._add({"from": "user", "text": text})
+    def user_message(self, text, user=None, media=None, reply_to=None):
+        return self._add({"from": "user", "text": text, "user": user, "media": media, "reply_to": reply_to})
 
-    async def send(self, chat, text, buttons=None, links=None):
+    def system(self, text):
+        return self._add({"from": "system", "text": text})
+
+    async def send(self, chat, text, buttons=None, links=None, keyboard=None, remove_keyboard=False, columns=1):
+        if keyboard is not None or remove_keyboard:
+            self.keyboard = keyboard   # клавиатура под полем ввода тест-чата
         return self._add({"from": "bot", "chat": str(chat), "text": text, "buttons": buttons or [],
                           "links": links or []})
+
+    async def send_file(self, chat, media, caption):
+        return self._add({"from": "bot", "chat": str(chat), "media": media, "text": caption or ""})
+
+    async def delete_message(self, chat, message_id):
+        for m in self.messages:
+            if m["id"] == message_id:
+                m["deleted"] = True
+                return
+        raise_tg("сообщение не найдено")
+
+    async def moderate(self, chat, user_id, action, until):
+        name = {"mute": "замьючен", "unmute": "размьючен", "ban": "забанен", "unban": "разбанен",
+                "kick": "выгнан"}[action]
+        when = f" до {time.strftime('%H:%M %d.%m', time.localtime(until))}" if until else ""
+        self.system(f"🛡 участник {user_id} {name}{when}")
+
+    async def member_status(self, chat, user_id):
+        return self.chat_admins.get(str(user_id), "member")
+
+    async def refund(self, user_id, charge_id):
+        self.system(f"↩ возврат Stars: {charge_id}")
 
     async def photo(self, chat, url, caption):
         return self._add({"from": "bot", "chat": str(chat), "photo": url, "text": caption})
@@ -741,12 +916,53 @@ class TelegramTransport:
         from .telegram import call
         return await call(self.token, method, **params)
 
-    async def send(self, chat, text, buttons=None, links=None):
-        rows = [[{"text": b["text"], "callback_data": b["id"]}] for b in buttons or []]
-        rows += [[{"text": b["text"], "url": b["url"]}] for b in links or []]
-        m = await self._call("sendMessage", chat_id=chat, text=text[:4096] or "…",
-                             reply_markup={"inline_keyboard": rows} if rows else None)
+    async def send(self, chat, text, buttons=None, links=None, keyboard=None, remove_keyboard=False, columns=1):
+        markup = None
+        if keyboard is not None:
+            markup = {"keyboard": keyboard, "resize_keyboard": True, "one_time_keyboard": True}
+        elif remove_keyboard:
+            markup = {"remove_keyboard": True}
+        else:
+            rows = _rows([{"text": b["text"], "callback_data": b["id"]} for b in buttons or []], columns)
+            rows += [[{"text": b["text"], "url": b["url"]}] for b in links or []]
+            markup = {"inline_keyboard": rows} if rows else None
+        m = await self._call("sendMessage", chat_id=chat, text=text[:4096] or "…", reply_markup=markup)
         return m.get("message_id") if isinstance(m, dict) else None
+
+    async def send_file(self, chat, media, caption):
+        method, field_ = {"photo": ("sendPhoto", "photo"), "video": ("sendVideo", "video"),
+                          "voice": ("sendVoice", "voice"), "audio": ("sendAudio", "audio")}.get(
+            media.get("kind"), ("sendDocument", "document"))
+        m = await self._call(method, chat_id=chat, caption=(caption or "")[:1024] or None,
+                             **{field_: media["file_id"]})
+        return m.get("message_id") if isinstance(m, dict) else None
+
+    async def delete_message(self, chat, message_id):
+        await self._call("deleteMessage", chat_id=chat, message_id=message_id)
+
+    async def moderate(self, chat, user_id, action, until):
+        uid = int(user_id)
+        if action in ("mute", "unmute"):
+            allow = action == "unmute"
+            perms = {k: allow for k in ("can_send_messages", "can_send_audios", "can_send_documents", "can_send_photos",
+                                        "can_send_videos", "can_send_video_notes", "can_send_voice_notes",
+                                        "can_send_polls", "can_send_other_messages", "can_add_web_page_previews")}
+            await self._call("restrictChatMember", chat_id=chat, user_id=uid, permissions=perms,
+                             until_date=until or None)
+        elif action == "ban":
+            await self._call("banChatMember", chat_id=chat, user_id=uid, until_date=until or None)
+        elif action == "unban":
+            await self._call("unbanChatMember", chat_id=chat, user_id=uid, only_if_banned=True)
+        elif action == "kick":
+            await self._call("banChatMember", chat_id=chat, user_id=uid)
+            await self._call("unbanChatMember", chat_id=chat, user_id=uid, only_if_banned=True)
+
+    async def member_status(self, chat, user_id):
+        m = await self._call("getChatMember", chat_id=chat, user_id=int(user_id))
+        return (m or {}).get("status", "member") if isinstance(m, dict) else "member"
+
+    async def refund(self, user_id, charge_id):
+        await self._call("refundStarPayment", user_id=int(user_id), telegram_payment_charge_id=charge_id)
 
     async def photo(self, chat, url, caption):
         m = await self._call("sendPhoto", chat_id=chat, photo=url, caption=(caption or "")[:1024] or None)
@@ -792,6 +1008,19 @@ class TelegramTransport:
             pass
 
 
+def _rows(buttons: list, columns) -> list[list]:
+    try:
+        n = max(1, min(int(float(columns or 1)), 8))
+    except (TypeError, ValueError):
+        n = 1
+    return [buttons[i:i + n] for i in range(0, len(buttons), n)]
+
+
+def raise_tg(message):
+    from .telegram import TelegramError
+    raise TelegramError(message)
+
+
 def _fmt_amount(amount: int, currency: str) -> str:
     return f"{amount} ⭐" if currency == "XTR" else f"{amount / 100:.2f} {currency}"
 
@@ -829,6 +1058,8 @@ class BotEngine:
         self.busy = 0
         self.log: deque = deque(maxlen=300)
         self.stats = {"in": 0, "out": 0, "errors": 0}
+        self.flood: dict[str, deque] = {}
+        self.admin_cache: dict[str, tuple[float, bool]] = {}
 
     def event(self, kind, chat, text, node=None, user=None):
         self.log.appendleft({"t": time.time(), "kind": kind, "chat": str(chat), "user": user, "text": str(text)[:500],
@@ -851,6 +1082,11 @@ class BotEngine:
         if role == "banned":
             self.event("in", chat, "[заблокирован] " + str(upd.get("text") or ""), user=user.get("name"))
             return
+        chat_type = upd.get("chat_type") or "private"
+        media, contact, member = upd.get("media"), upd.get("contact"), upd.get("member")
+        if media or contact or member:
+            await self._special(upd, chat, user, key, saved, role, chat_type)
+            return
         cb = upd.get("callback")
         if cb:
             self.event("in", chat, f"[кнопка {cb.get('data')}]", user=user.get("name"))
@@ -863,14 +1099,14 @@ class BotEngine:
             return
         text = str(upd.get("text") or "")
         self.event("in", chat, text, user=user.get("name"))
-        route, args = self.compiled.route(text)
+        route, args = self.compiled.route(text, chat_type)
         w = self.waiters.get(key)
         if w and not w.future.done():
             is_command = text.startswith("/") and route is not None and route.kind == "command"
             if is_command:
                 w.future.cancel()                      # команда прерывает незаконченный диалог
-            elif w.kind == "text":
-                w.future.set_result(text)
+            elif w.kind in ("text", "media", "contact"):
+                w.future.set_result({"text": text})
                 return
             else:
                 hit = next((b["id"] for b in w.buttons if b["text"].strip().lower() == text.strip().lower()), None)
@@ -879,15 +1115,57 @@ class BotEngine:
                     return
         if route is None:
             return
+        await self._start(route, upd, chat, user, key, saved, role, chat_type, text, args)
+
+    async def _start(self, route, upd, chat, user, key, saved, role, chat_type, text, args):
         if route.roles and role != "admin" and role not in route.roles:
             await self._send(chat, self.compiled.deny_text, route.node)
             return
+        group = chat_type in ("group", "supergroup")
+        reply = upd.get("reply") or {}
         ctx = {"text": text, "args": args, "chat_id": chat, "user_id": str(user["id"]),
                "user_name": user.get("name") or "", "username": user.get("username") or "", "saved": saved,
-               "role": role, "is_admin": role == "admin"}
+               "role": role, "is_admin": role == "admin", "chat_type": chat_type, "is_group": group,
+               "chat_title": upd.get("chat_title") or "", "message_id": upd.get("message_id"),
+               "file": upd.get("media"), "reply_user_id": str(reply["user_id"]) if reply.get("user_id") else None,
+               "reply_user_name": reply.get("user_name"), "reply_message_id": reply.get("message_id"),
+               "is_chat_admin": await self._chat_admin(chat, user["id"]) if group else False}
         task = asyncio.ensure_future(self._run(route, ctx, key))
         self.tasks.add(task)
         task.add_done_callback(self.tasks.discard)
+
+    async def _chat_admin(self, chat, user_id) -> bool:
+        """Админ ли пользователь в группе (кэш на 5 минут — getChatMember недёшев)."""
+        k = f"{chat}:{user_id}"
+        hit = self.admin_cache.get(k)
+        if hit and time.monotonic() - hit[0] < 300:
+            return hit[1]
+        from .telegram import TelegramError
+        try:
+            value = await self.transport.member_status(chat, user_id) in ("creator", "administrator")
+        except TelegramError:
+            value = False
+        self.admin_cache[k] = (time.monotonic(), value)
+        return value
+
+    async def _special(self, upd, chat, user, key, saved, role, chat_type):
+        """Файл, контакт или вход/выход участника."""
+        media, contact, member = upd.get("media"), upd.get("contact"), upd.get("member")
+        label = (f"[{media['kind']}] {media.get('name') or ''}" if media else
+                 f"[контакт] {contact.get('phone')}" if contact else f"[участник {member}]")
+        self.event("in", chat, (label + " " + (upd.get("text") or "")).strip(), user=user.get("name"))
+        w = self.waiters.get(key)
+        if w and not w.future.done() and not member:
+            if (w.kind == "media" and media) or (w.kind == "contact" and contact):
+                w.future.set_result({"media": media, "contact": contact})
+                return
+            if w.kind in ("text", "media", "contact"):
+                w.future.set_result({"media": media, "contact": contact})
+                return
+        route, _ = self.compiled.route("", chat_type, media=media, member=member)
+        if route is None:
+            return
+        await self._start(route, upd, chat, user, key, saved, role, chat_type, str(upd.get("text") or ""), "")
 
     async def _run(self, route: Route, ctx: dict, key: str):
         self.busy += 1
@@ -968,6 +1246,7 @@ class BotEngine:
                 del self.waiters[key]
 
     async def _send(self, chat, text, node, **kw):
+        kw = {k: v for k, v in kw.items() if v is not None}
         from .telegram import TelegramError
         try:
             mid = await self.transport.send(chat, text, **kw)
@@ -1037,6 +1316,55 @@ class BotEngine:
                         "charge_id": paid.get("charge_id")}
                 await self.block(s["branches"]["paid" if paid else "timeout"], ctx, key)
                 return
+            elif op == "bot_send_file":
+                media = self._ev(s.get("source") or "file", ctx, node, "файл")
+                if isinstance(media, str):
+                    media = {"kind": "document", "file_id": media}
+                if not isinstance(media, dict) or not media.get("file_id"):
+                    raise FlowError(node, "нет файла: в переменной должен быть файл из события или ответа «Спросить»")
+                caption = self._text(s.get("caption") or "", ctx, node, "подпись")
+                to = s.get("to") or "current"
+                targets = (self.store.by_role(s.get("role") or "all", self.compiled.admins) if to == "role" else
+                           [self._text(s.get("chat") or "", ctx, node, "чат").strip() or chat] if to == "chat" else [chat])
+                from .telegram import TelegramError
+                for t in targets:
+                    try:
+                        await self.transport.send_file(t, media, caption)
+                    except TelegramError as e:
+                        raise FlowError(node, f"Telegram: {e}") from None
+                    if len(targets) > 1:
+                        await asyncio.sleep(0.05)
+                self.event("out", chat, f"[{media.get('kind')}] {media.get('name') or ''} → {len(targets)} чат(ов)", node)
+            elif op == "bot_refund":
+                from .telegram import TelegramError
+                charge = str(self._ev(s.get("charge_id") or "None", ctx, node, "ID платежа") or "")
+                payer = str(self._ev(s.get("user") or "user_id", ctx, node, "кто платил") or "")
+                error = None
+                if not charge:
+                    error = "нет ID платежа"
+                else:
+                    try:
+                        await self.transport.refund(payer, charge)
+                        self.store.mark_refunded(charge)
+                        self.event("out", chat, f"[возврат Stars] {charge}", node)
+                    except TelegramError as e:
+                        error = str(e)
+                if s.get("var"):
+                    ctx[s["var"]] = error
+                await self.block(s["branches"]["error" if error else "ok"], ctx, key)
+                return
+            elif op == "bot_filter":
+                reason = await self._check_spam(s, ctx, node)
+                if s.get("var"):
+                    ctx[s["var"]] = reason
+                await self.block(s["branches"]["violation" if reason else "ok"], ctx, key)
+                return
+            elif op == "bot_moderate":
+                error = await self._moderate(s, ctx, node)
+                if s.get("var"):
+                    ctx[s["var"]] = error
+                await self.block(s["branches"]["error" if error else "ok"], ctx, key)
+                return
             elif op == "bot_photo":
                 from .telegram import TelegramError
                 url = self._text(s["url"], ctx, node, "адрес")
@@ -1046,21 +1374,38 @@ class BotEngine:
                     raise FlowError(node, f"Telegram: {e}") from None
                 self.event("out", chat, f"[фото] {url}", node)
             elif op == "bot_ask":
-                await self._send(chat, self._text(s["text"], ctx, node, "вопрос"), node)
+                kind = s.get("type") or "text"
+                keyboard = [[{"text": s.get("button") or "📱 Поделиться номером", "request_contact": True}]] \
+                    if kind == "contact" else None
+                await self._send(chat, self._text(s["text"], ctx, node, "вопрос"), node, keyboard=keyboard)
                 timeout = min(self._num(s.get("timeout"), ctx, node, "ожидание", 3600), WAIT_LIMIT)
                 branch = "timeout"
+                wkind = {"photo": "media", "file": "media", "contact": "contact"}.get(kind, "text")
                 for _ in range(5):
-                    answer = await self._wait(key, Waiter("text", asyncio.get_running_loop().create_future()), timeout)
-                    if answer is None:
+                    reply = await self._wait(key, Waiter(wkind, asyncio.get_running_loop().create_future()), timeout)
+                    if reply is None:
                         break
-                    value, good = answer, True
-                    if s.get("type") in ("number", "int"):
+                    answer = reply.get("text")
+                    value, good = answer, answer is not None
+                    if kind in ("photo", "file"):
+                        media = reply.get("media")
+                        good = bool(media) and (kind == "file" or media.get("kind") == "photo")
+                        value = media
+                    elif kind == "contact":
+                        c = reply.get("contact")
+                        good = bool(c) and str(c.get("user_id") or "") in ("", ctx["user_id"])
+                        value = c.get("phone") if c else None
+                        if good:
+                            await self.transport.send(chat, "✓", remove_keyboard=True)
+                    elif s.get("type") in ("number", "int") and answer is not None:
                         try:
                             num = float(answer.replace(",", ".").strip())
                             value = int(num) if s["type"] == "int" and num.is_integer() else num
                             good = s["type"] != "int" or float(num).is_integer()
                         except ValueError:
                             good = False
+                    elif s.get("type") in ("number", "int"):
+                        good = False
                     if good:
                         ctx[s["var"]] = value
                         branch = "ok"
@@ -1071,14 +1416,19 @@ class BotEngine:
                 return
             elif op == "bot_menu":
                 text = self._text(s["text"], ctx, node, "текст")
-                mid = await self._send(chat, text, node, buttons=s["buttons"])
+                if s.get("keyboard") == "reply":
+                    rows = _rows([{"text": b["text"]} for b in s["buttons"]], s.get("columns"))
+                    mid = await self._send(chat, text, node, keyboard=rows)
+                else:
+                    mid = await self._send(chat, text, node, buttons=s["buttons"], columns=s.get("columns"))
                 timeout = min(self._num(s.get("timeout"), ctx, node, "ожидание", 3600), WAIT_LIMIT)
                 choice = await self._wait(key, Waiter("menu", asyncio.get_running_loop().create_future(), mid,
                                                       s["buttons"]), timeout)
                 label = next((b["text"] for b in s["buttons"] if b["id"] == choice), None)
                 if s.get("var"):
                     ctx[s["var"]] = label
-                await self.transport.finish_menu(chat, mid, f"→ {label}" if label else "⌛", s.get("remove", True))
+                if s.get("keyboard") != "reply":
+                    await self.transport.finish_menu(chat, mid, f"→ {label}" if label else "⌛", s.get("remove", True))
                 await self.block(s["branches"].get(choice or "timeout", []), ctx, key)
                 return
             elif op == "condition":
@@ -1129,6 +1479,69 @@ class BotEngine:
                     ctx[s["target"]] = result
             else:
                 raise FlowError(node, f"неизвестный шаг «{op}»")
+
+    async def _check_spam(self, s, ctx, node) -> str | None:
+        if s.get("skip_admins", True) and (ctx.get("is_admin") or ctx.get("is_chat_admin")):
+            return None
+        text = str(ctx.get("text") or "")
+        low = text.lower()
+        key = f"{ctx['chat_id']}:{ctx['user_id']}"
+        count = int(self._num(s.get("flood_count"), ctx, node, "флуд", 0))
+        if count > 0:
+            window = self._num(s.get("flood_seconds"), ctx, node, "флуд", 10)
+            q = self.flood.setdefault(key, deque(maxlen=200))
+            now = time.monotonic()
+            q.append(now)
+            while q and now - q[0] > window:
+                q.popleft()
+            if len(q) > count:
+                return f"флуд: больше {count} сообщений за {window:g} с"
+        if s.get("links") and re.search(r"(https?://|www\.|t\.me/|\b[a-z0-9-]+\.(ru|com|net|org|io|me|su|рф)\b|@\w{5,})",
+                                        low):
+            return "ссылка"
+        for w in s.get("words") or []:
+            if w and w in low:
+                return f"стоп-слово «{w}»"
+        letters = [ch for ch in text if ch.isalpha()]
+        if s.get("caps") and len(letters) >= 10 and sum(ch.isupper() for ch in letters) / len(letters) > 0.7:
+            return "капс"
+        limit = int(self._num(s.get("max_length"), ctx, node, "длина", 0))
+        if limit and len(text) > limit:
+            return f"длиннее {limit} символов"
+        return None
+
+    async def _moderate(self, s, ctx, node) -> str | None:
+        from .telegram import TelegramError
+        action, target = s.get("action") or "delete", s.get("target") or "author"
+        chat = ctx["chat_id"]
+        if not ctx.get("is_group") and action != "delete":
+            return "модерация работает только в группах"
+        if target == "reply":
+            uid, mid = ctx.get("reply_user_id"), ctx.get("reply_message_id")
+            if not uid:
+                return "команду нужно отправить ответом на сообщение нарушителя"
+        elif target == "id":
+            uid = self._text(s.get("target_id") or "", ctx, node, "ID").strip()
+            mid = None
+            if not uid.lstrip("-").isdigit():
+                return f"«{uid}» — не ID пользователя"
+        else:
+            uid, mid = ctx["user_id"], ctx.get("message_id")
+        if action != "delete" and str(uid) in self.compiled.admins:
+            return "это администратор бота"
+        minutes = self._num(s.get("minutes"), ctx, node, "минуты", 0) if action in ("mute", "ban") else 0
+        until = int(time.time() + minutes * 60) if minutes else 0
+        try:
+            if action == "delete":
+                if not mid:
+                    return "нет сообщения для удаления"
+                await self.transport.delete_message(chat, mid)
+            else:
+                await self.transport.moderate(chat, uid, action, until)
+        except TelegramError as e:
+            return str(e)
+        self.event("out", chat, f"[модерация] {action} {uid}", node)
+        return None
 
     async def _broadcast(self, role, text, node, links=None) -> int:
         """Рассылка: не быстрее ~20 сообщений в секунду (лимит Telegram — 30)."""
@@ -1227,9 +1640,46 @@ def normalize_update(upd: dict) -> dict | None:
         return {"chat": (msg.get("chat") or {}).get("id"), "user": _user(msg.get("from") or {}),
                 "payment": {"currency": p.get("currency"), "total_amount": p.get("total_amount"),
                             "payload": p.get("invoice_payload"), "charge_id": p.get("telegram_payment_charge_id")}}
-    if not msg or "text" not in msg:
+    if not msg:
         return None
-    return {"chat": (msg.get("chat") or {}).get("id"), "user": _user(msg.get("from") or {}), "text": msg["text"]}
+    chat = msg.get("chat") or {}
+    out = {"chat": chat.get("id"), "chat_type": chat.get("type") or "private", "chat_title": chat.get("title"),
+           "user": _user(msg.get("from") or {}), "message_id": msg.get("message_id"),
+           "text": msg.get("text") or msg.get("caption") or ""}
+    r = msg.get("reply_to_message")
+    if r:
+        out["reply"] = {"user_id": (r.get("from") or {}).get("id"), "user_name": _user(r.get("from") or {})["name"],
+                        "message_id": r.get("message_id")}
+    if msg.get("new_chat_members"):
+        out["member"] = "join"
+        out["user"] = _user(msg["new_chat_members"][0])
+        return out
+    if msg.get("left_chat_member"):
+        out["member"] = "leave"
+        out["user"] = _user(msg["left_chat_member"])
+        return out
+    if msg.get("contact"):
+        c = msg["contact"]
+        out["contact"] = {"phone": c.get("phone_number"), "first_name": c.get("first_name"), "user_id": c.get("user_id")}
+        return out
+    media = _media(msg)
+    if media:
+        out["media"] = media
+        return out
+    return out if "text" in msg else None
+
+
+def _media(msg: dict) -> dict | None:
+    if msg.get("photo"):
+        p = msg["photo"][-1]   # самый большой размер
+        return {"kind": "photo", "file_id": p.get("file_id"), "size": p.get("file_size"), "name": "photo.jpg",
+                "mime": "image/jpeg"}
+    for kind in ("document", "video", "voice", "audio", "animation", "video_note"):
+        f = msg.get(kind)
+        if f:
+            return {"kind": {"animation": "video", "video_note": "video"}.get(kind, kind), "file_id": f.get("file_id"),
+                    "size": f.get("file_size"), "name": f.get("file_name") or kind, "mime": f.get("mime_type")}
+    return None
 
 
 def _user(u: dict) -> dict:
@@ -1387,12 +1837,37 @@ class BotManager:
 
 
 EMU_CHAT = "1"
+EMU_GROUP = "-100"
 EMU_USER = {"id": 1, "name": "Вы", "username": "tester"}
+EMU_OTHER = {"id": 2, "name": "Участник", "username": "member"}
 
 
 async def emulate(engine: BotEngine, text: str | None = None, button: dict | None = None, wait: float = 4,
-                  pay: dict | None = None):
+                  pay: dict | None = None, group: bool = False, as_other: bool = False, reply_to: int | None = None,
+                  media: dict | None = None, contact: bool = False, member: str | None = None):
     tr: EmulatorTransport = engine.transport
+    user = EMU_OTHER if as_other else EMU_USER
+    chat = EMU_GROUP if group else EMU_CHAT
+    base = {"chat": chat, "chat_type": "supergroup" if group else "private",
+            "chat_title": "Тестовая группа" if group else None, "user": user}
+    if reply_to is not None:
+        orig = next((m for m in tr.messages if m["id"] == reply_to), None)
+        if orig is not None:
+            ru = orig.get("user") or ({"id": 0, "name": "бот"} if orig["from"] == "bot" else EMU_USER)
+            base["reply"] = {"user_id": ru["id"], "user_name": ru["name"], "message_id": reply_to}
+    if member is not None:
+        tr.system(f"👥 {user['name']} {'вошёл в группу' if member == 'join' else 'вышел из группы'}")
+        await engine.handle({**base, "member": member})
+        text = button = pay = None
+    elif media is not None:
+        mid = tr.user_message(text or "", user, media, reply_to)
+        await engine.handle({**base, "message_id": mid, "text": text or "", "media": media})
+        text = button = pay = None
+    elif contact:
+        mid = tr.user_message("📱 +7 900 000-00-00", user)
+        await engine.handle({**base, "message_id": mid, "contact": {"phone": "+79000000000", "first_name": user["name"],
+                                                                     "user_id": user["id"]}})
+        text = button = pay = None
     if pay is not None:
         msg = next((m for m in tr.messages if m["id"] == pay.get("message_id") and m.get("invoice")), None)
         if msg is None:
@@ -1404,17 +1879,16 @@ async def emulate(engine: BotEngine, text: str | None = None, button: dict | Non
             msg["note"] = "счёт устарел"
             return
         msg["note"] = "оплачено (тест)"
-        await engine.handle({"chat": EMU_CHAT, "user": EMU_USER, "payment": {
+        await engine.handle({**base, "payment": {
             "currency": inv["currency"], "total_amount": inv["amount"], "payload": inv["payload"],
             "charge_id": "test-" + uuid.uuid4().hex[:8]}})
     elif text is not None:
-        tr.user_message(text)
-        await engine.handle({"chat": EMU_CHAT, "user": EMU_USER, "text": text})
+        mid = tr.user_message(text, user, None, reply_to)
+        await engine.handle({**base, "message_id": mid, "text": text})
     elif button is not None:
-        tr.user_message(f"[{button.get('text') or button.get('data')}]")
-        await engine.handle({"chat": EMU_CHAT, "user": EMU_USER,
-                             "callback": {"id": uuid.uuid4().hex, "data": button.get("data"),
-                                          "message_id": button.get("message_id")}})
+        tr.user_message(f"[{button.get('text') or button.get('data')}]", user)
+        await engine.handle({**base, "callback": {"id": uuid.uuid4().hex, "data": button.get("data"),
+                                                  "message_id": button.get("message_id")}})
     end = time.monotonic() + wait
     await asyncio.sleep(0.02)
     while engine.busy > 0 and time.monotonic() < end:

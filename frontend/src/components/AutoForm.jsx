@@ -387,6 +387,18 @@ export function autoSummary(type, d) {
       return `/${d.command}${(d.roles || []).length ? ` 🔒${d.roles.join(',')}` : d.description ? ` — ${d.description}` : ''}`
     case 'bot_role':
       return `${d.target || 'себе'} → ${d.role}`
+    case 'bot_file':
+      return `${{ any: 'любой файл', photo: 'фото', document: 'документ', video: 'видео', voice: 'голосовое', audio: 'аудио' }[d.kind]}${d.where && d.where !== 'any' ? ` · ${d.where === 'group' ? 'группы' : 'личка'}` : ''}`
+    case 'bot_member':
+      return d.action === 'leave' ? 'участник вышел' : 'новый участник'
+    case 'bot_send_file':
+      return `${d.source} → ${d.to === 'role' ? `📢 ${d.role}` : d.to === 'chat' ? d.chat : 'этот чат'}`
+    case 'bot_refund':
+      return `↩ ${d.charge_id}`
+    case 'bot_filter':
+      return [d.links && 'ссылки', (d.words || []).length && `${d.words.length} слов`, d.caps && 'капс', Number(d.flood_count) && 'флуд'].filter(Boolean).join(', ')
+    case 'bot_moderate':
+      return `${{ delete: 'удалить', mute: 'мьют', unmute: 'снять мьют', ban: 'бан', unban: 'разбан', kick: 'выгнать' }[d.action]} · ${{ author: 'автор', reply: 'по ответу', id: d.target_id }[d.target]}${['mute', 'ban'].includes(d.action) && Number(d.minutes) ? ` ${d.minutes} мин` : ''}`
     case 'bot_invoice':
       return `${d.title}: ${d.amount} ${d.currency === 'XTR' ? '⭐' : d.currency}`
     case 'bot_message':

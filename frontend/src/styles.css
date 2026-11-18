@@ -413,3 +413,18 @@ kbd { font-family: var(--mono); font-size: 11px; padding: 0 4px; border: 1px sol
 .emu-role { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .role-banned { color: var(--danger); }
 .settings-h { margin: 18px 0 6px; font-size: 13px; }
+.emu-modes { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 12px; }
+.emu-modes .check { display: inline-flex; gap: 4px; align-items: center; }
+.bubble.other { align-self: flex-start; background: color-mix(in srgb, var(--warn) 10%, var(--panel)); }
+.bubble.deleted { opacity: .45; }
+.bubble.deleted .bubble-text { text-decoration: line-through; }
+.bubble-author { font-size: 11px; font-weight: 600; color: var(--muted); }
+.bubble-reply { font-size: 11px; color: var(--muted); border-left: 2px solid var(--border); padding-left: 6px; }
+.bubble-deleted { color: var(--danger); }
+.bubble-time .linklike { margin-left: 6px; }
+.emu-system { align-self: center; font-size: 12px; color: var(--muted); background: var(--panel); padding: 2px 10px; border-radius: 10px; }
+.emu-file { padding: 4px 8px; background: var(--code-bg); border-radius: 6px; }
+.emu-replying { font-size: 12px; color: var(--muted); }
+.emu-keyboard { display: flex; flex-direction: column; gap: 4px; }
+.emu-kb-row { display: flex; gap: 4px; }
+.emu-kb-row button { flex: 1; }

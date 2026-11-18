@@ -5,12 +5,29 @@ const fmtTime = (t) => (t ? new Date(t * 1000).toLocaleTimeString() : '')
 
 // ---------- тест-чат: бот по текущему графу, без Telegram ----------
 
+const FILE_ICON = { photo: '🖼', document: '📄', video: '🎬', voice: '🎤', audio: '🎵' }
+
+function readFile(file) {
+  return new Promise((resolve) => {
+    // превью только для небольших картинок — в тест-чате файл никуда не отправляется
+    if (!file.type.startsWith('image/') || file.size > 1_500_000) return resolve(null)
+    const r = new FileReader()
+    r.onload = () => resolve(r.result)
+    r.onerror = () => resolve(null)
+    r.readAsDataURL(file)
+  })
+}
+
 export function EmulatorPanel({ projectId, graph, readOnly, onSelectNode, onTrace }) {
   const [state, setState] = useState({ messages: [], log: [], waiting: false, saved: {} })
   const [text, setText] = useState('')
   const [error, setError] = useState(null)
   const [busy, setBusy] = useState(false)
+  const [group, setGroup] = useState(false)
+  const [asOther, setAsOther] = useState(false)
+  const [replyTo, setReplyTo] = useState(null)
   const list = useRef(null)
+  const fileInput = useRef(null)
   const graphRef = useRef(graph)
   graphRef.current = graph
 
@@ -32,7 +49,9 @@ export function EmulatorPanel({ projectId, graph, readOnly, onSelectNode, onTrac
     setBusy(true)
     setError(null)
     try {
-      apply(await api.botEmulator(projectId, { graph: graphRef.current, ...body }))
+      const chat = { group, as_other: asOther, reply_to: replyTo?.id ?? null }
+      apply(await api.botEmulator(projectId, { graph: graphRef.current, ...chat, ...body }))
+      setReplyTo(null)
     } catch (e) {
       setError(e.data?.detail?.issues?.length ? `${e.message}: ${e.data.detail.issues.map((i) => i.message).join('; ')}` : e.message)
     } finally {
@@ -45,57 +64,39 @@ export function EmulatorPanel({ projectId, graph, readOnly, onSelectNode, onTrac
     send({ text })
     setText('')
   }
+  const attach = async (e) => {
+    const f = e.target.files?.[0]
+    e.target.value = ''
+    if (!f) return
+    send({ file: { name: f.name, mime: f.type, size: f.size, preview: await readFile(f) }, text: text || null })
+    setText('')
+  }
   const errors = state.log.filter((e) => e.kind === 'error')
+  const keyboard = state.keyboard || null
+  const visible = state.messages
 
   return (
     <div className="emulator">
       <div className="emu-chat">
-        <div className="emu-messages" ref={list}>
-          {state.messages.length === 0 && (
-            <div className="muted pad">
-              Это тест-чат: напишите боту, например <code>/start</code>. Работает по текущему графу, даже несохранённому, без
-              Telegram и токена. Данные «Запомнить» здесь отдельные от настоящих пользователей.
-            </div>
+        <div className="emu-modes">
+          <label className="check">
+            <input type="checkbox" checked={group} onChange={(e) => setGroup(e.target.checked)} /> группа
+          </label>
+          {group && (
+            <>
+              <select value={asOther ? 'other' : 'me'} onChange={(e) => setAsOther(e.target.value === 'other')}>
+                <option value="me">писать от себя</option>
+                <option value="other">писать от «Участника»</option>
+              </select>
+              <label className="check" title="Вы — администратор тестовой группы (is_chat_admin)">
+                <input type="checkbox" checked={!!state.chat_admin} onChange={(e) => send({ chat_admin: e.target.checked })} /> я админ группы
+              </label>
+              <button className="small" disabled={readOnly || busy} onClick={() => send({ member: 'join', as_other: true })}>
+                + участник вошёл
+              </button>
+            </>
           )}
-          {state.messages.map((m) => (
-            <div key={m.id} className={`bubble ${m.from}`}>
-              {m.photo && <img src={m.photo} alt="" className="emu-photo" />}
-              {m.invoice && (
-                <button className="emu-button pay" disabled={readOnly || busy || !!m.note} onClick={() => send({ pay: { message_id: m.id } })}>
-                  💳 Оплатить (тест)
-                </button>
-              )}
-              {m.text && <div className="bubble-text">{m.text}</div>}
-              {(m.buttons || []).map((b) => (
-                <button
-                  key={b.id}
-                  className="emu-button"
-                  disabled={readOnly || busy}
-                  onClick={() => send({ button: { message_id: m.id, data: b.id, text: b.text } })}
-                >
-                  {b.text}
-                </button>
-              ))}
-              {(m.links || []).map((l, i) => (
-                <a key={i} className="emu-button" href={l.url} target="_blank" rel="noreferrer">
-                  {l.text} ↗
-                </a>
-              ))}
-              {m.note && <div className="muted">{m.note}</div>}
-              <div className="bubble-time">{fmtTime(m.t)}</div>
-            </div>
-          ))}
-        </div>
-        <form className="emu-input" onSubmit={submit}>
-          <input value={text} onChange={(e) => setText(e.target.value)} placeholder={state.waiting ? 'бот ждёт ответа…' : 'Сообщение или /команда'} disabled={readOnly} />
-          <button className="primary" disabled={readOnly || busy || !text.trim()}>
-            Отправить
-          </button>
-          <button type="button" onClick={() => send({ reset: true })} disabled={readOnly || busy} title="Очистить чат и диалоги">
-            ⟲
-          </button>
-        </form>
-        <div className="emu-role muted">
+          <span className="spacer" />
           Тестировать как{' '}
           <select value={state.role || 'user'} onChange={(e) => send({ as_role: e.target.value })} disabled={readOnly || busy}>
             {(state.roles || ['admin', 'user']).map((r) => (
@@ -103,9 +104,102 @@ export function EmulatorPanel({ projectId, graph, readOnly, onSelectNode, onTrac
                 {r}
               </option>
             ))}
-          </select>{' '}
-          — так проверяются команды для ролей и бан.
+          </select>
         </div>
+        <div className="emu-messages" ref={list}>
+          {visible.length === 0 && (
+            <div className="muted pad">
+              Это тест-чат: напишите боту, например <code>/start</code>. Работает по текущему графу, даже несохранённому, без
+              Telegram и токена. «Группа» — проверить модерацию: пишите от «Участника», отвечайте на сообщения (↩).
+            </div>
+          )}
+          {visible.map((m) =>
+            m.from === 'system' ? (
+              <div key={m.id} className="emu-system">
+                {m.text}
+              </div>
+            ) : (
+              <div key={m.id} className={`bubble ${m.from} ${m.user?.id === 2 ? 'other' : ''} ${m.deleted ? 'deleted' : ''}`}>
+                {m.from === 'user' && m.user?.id === 2 && <div className="bubble-author">Участник</div>}
+                {m.from === 'bot' && m.chat && !['1', '-100'].includes(m.chat) && <div className="bubble-author">→ чат {m.chat}</div>}
+                {m.reply_to && <div className="bubble-reply">↩ ответ на сообщение #{m.reply_to}</div>}
+                {m.photo && <img src={m.photo} alt="" className="emu-photo" />}
+                {m.media &&
+                  (m.media.preview ? (
+                    <img src={m.media.preview} alt={m.media.name} className="emu-photo" />
+                  ) : (
+                    <div className="emu-file">
+                      {FILE_ICON[m.media.kind] || '📎'} {m.media.name} {m.media.size ? <span className="muted">{Math.ceil(m.media.size / 1024)} КБ</span> : null}
+                    </div>
+                  ))}
+                {m.text && <div className="bubble-text">{m.text}</div>}
+                {m.invoice && (
+                  <button className="emu-button pay" disabled={readOnly || busy || !!m.note} onClick={() => send({ pay: { message_id: m.id } })}>
+                    💳 Оплатить (тест)
+                  </button>
+                )}
+                {(m.buttons || []).map((b) => (
+                  <button key={b.id} className="emu-button" disabled={readOnly || busy} onClick={() => send({ button: { message_id: m.id, data: b.id, text: b.text } })}>
+                    {b.text}
+                  </button>
+                ))}
+                {(m.links || []).map((l, i) => (
+                  <a key={i} className="emu-button" href={l.url} target="_blank" rel="noreferrer">
+                    {l.text} ↗
+                  </a>
+                ))}
+                {m.note && <div className="muted">{m.note}</div>}
+                <div className="bubble-time">
+                  {m.deleted && <span className="bubble-deleted">удалено · </span>}#{m.id} {fmtTime(m.t)}
+                  {group && !m.deleted && (
+                    <button className="linklike" title="Ответить на это сообщение" onClick={() => setReplyTo(m)}>
+                      ↩
+                    </button>
+                  )}
+                </div>
+              </div>
+            ),
+          )}
+        </div>
+        {replyTo && (
+          <div className="emu-replying">
+            ↩ ответ на #{replyTo.id}: {String(replyTo.text || replyTo.media?.name || '').slice(0, 60)}{' '}
+            <button className="linklike" onClick={() => setReplyTo(null)}>
+              отменить
+            </button>
+          </div>
+        )}
+        {keyboard && (
+          <div className="emu-keyboard">
+            {keyboard.map((row, i) => (
+              <div key={i} className="emu-kb-row">
+                {row.map((b, j) => (
+                  <button key={j} disabled={readOnly || busy} onClick={() => (b.request_contact ? send({ contact: true }) : send({ text: b.text }))}>
+                    {b.text}
+                  </button>
+                ))}
+              </div>
+            ))}
+          </div>
+        )}
+        <form className="emu-input" onSubmit={submit}>
+          <button type="button" title="Прикрепить фото или файл" disabled={readOnly || busy} onClick={() => fileInput.current?.click()}>
+            📎
+          </button>
+          <input ref={fileInput} type="file" hidden onChange={attach} />
+          <input
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            placeholder={state.waiting ? 'бот ждёт ответа…' : group ? 'Сообщение в группу' : 'Сообщение или /команда'}
+            disabled={readOnly}
+          />
+          <button className="primary" disabled={readOnly || busy || !text.trim()}>
+            Отправить
+          </button>
+          <button type="button" onClick={() => send({ reset: true })} disabled={readOnly || busy} title="Очистить чат и диалоги">
+            ⟲
+          </button>
+        </form>
         {error && <div className="issue error">{error}</div>}
       </div>
       <div className="emu-side">
@@ -367,7 +461,13 @@ export function BotTab({ bot, setBot, env, setEnv }) {
         </select>
       </label>
       <div className="hint">
-        Переменные в блоках: <code>role</code>, <code>is_admin</code>, <code>text</code> — текст сообщения, <code>args</code> — текст после команды, <code>user_name</code>,{' '}
+        <b>Группы.</b> Добавьте бота в группу и сделайте администратором с правами «Удалять сообщения» и «Блокировать
+        пользователей» — иначе Telegram не покажет ему все сообщения и не даст модерировать. События с «Где: только в
+        группах», блоки «Антиспам» и «Модерация»; <code>/ban</code> отправляйте ответом на сообщение нарушителя.
+      </div>
+      <div className="hint">
+        Переменные в блоках: <code>role</code>, <code>is_admin</code>, <code>is_group</code>, <code>is_chat_admin</code>,{' '}
+        <code>file</code> (полученный файл), <code>reply_user_id</code>, <code>text</code> — текст сообщения, <code>args</code> — текст после команды, <code>user_name</code>,{' '}
         <code>username</code>, <code>user_id</code>, <code>chat_id</code>, <code>saved['ключ']</code> — сохранённое блоком «Запомнить».
       </div>
     </section>
@@ -456,6 +556,7 @@ export function BotPayments({ projectId }) {
             <th>Пользователь</th>
             <th>Сумма</th>
             <th>ID платежа Telegram</th>
+            <th></th>
           </tr>
         </thead>
         <tbody>
@@ -467,6 +568,28 @@ export function BotPayments({ projectId }) {
               </td>
               <td>{fmt(p.amount, p.currency)}</td>
               <td className="mono">{p.charge_id}</td>
+              <td>
+                {p.refunded ? (
+                  <span className="muted">возвращён</span>
+                ) : p.currency === 'XTR' ? (
+                  <button
+                    className="small"
+                    onClick={async () => {
+                      if (!confirm(`Вернуть ${p.amount} ⭐ пользователю ${p.user_name || p.user_id}?`)) return
+                      try {
+                        await api.botRefund(projectId, p.charge_id)
+                        setItems(await api.botPayments(projectId))
+                      } catch (e) {
+                        alert(e.message)
+                      }
+                    }}
+                  >
+                    ↩ Вернуть
+                  </button>
+                ) : (
+                  <span className="muted" title="Возврат оплаты в валюте делает платёжный провайдер">через провайдера</span>
+                )}
+              </td>
             </tr>
           ))}
         </tbody>

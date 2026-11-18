@@ -14,6 +14,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import time
+import uuid
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
@@ -1129,6 +1130,13 @@ class EmulatorIn(BaseModel):
     button: dict | None = None     # {message_id, data, text}
     pay: dict | None = None        # {message_id} — «Оплатить (тест)»
     as_role: str | None = None     # тестировать как admin / moderator / user
+    group: bool = False            # писать в тестовую группу
+    as_other: bool = False         # от имени другого участника (для проверки модерации)
+    reply_to: int | None = None    # ответом на сообщение тест-чата
+    file: dict | None = None       # {name, mime, size, preview} — прикреплённый файл
+    contact: bool = False          # «поделиться номером»
+    member: str | None = None      # join / leave — участник вошёл или вышел
+    chat_admin: bool | None = None # «вы» — администратор тестовой группы
     reset: bool = False
 
 
@@ -1177,13 +1185,27 @@ async def bot_emulator(pid: str, body: EmulatorIn):
         if body.as_role not in compiled.all_roles():
             raise HTTPException(400, f"неизвестная роль «{body.as_role}»")
         engine.store.set_role(bots.EMU_USER["id"], body.as_role)
-    if body.text is not None or body.button is not None or body.pay is not None:
-        await bots.emulate(engine, body.text, body.button, pay=body.pay)
+    if body.chat_admin is not None:
+        engine.transport.chat_admins = {"1": "administrator"} if body.chat_admin else {}
+        engine.admin_cache.clear()
+    media = None
+    if body.file is not None:
+        mime = str(body.file.get("mime") or "")
+        kind = "photo" if mime.startswith("image/") else "video" if mime.startswith("video/") else \
+            "audio" if mime.startswith("audio/") else "document"
+        preview = body.file.get("preview")
+        media = {"kind": kind, "file_id": "emu-" + uuid.uuid4().hex[:10], "name": str(body.file.get("name") or "file")[:200],
+                 "size": body.file.get("size"), "mime": mime,
+                 "preview": preview if isinstance(preview, str) and len(preview) < 2_000_000 else None}
+    if any(x is not None for x in (body.text, body.button, body.pay, media, body.member)) or body.contact:
+        await bots.emulate(engine, body.text, body.button, pay=body.pay, group=body.group, as_other=body.as_other,
+                           reply_to=body.reply_to, media=media, contact=body.contact, member=body.member)
     return _emulator_state(engine)
 
 
 def _emulator_state(engine) -> dict:
     return {"messages": engine.transport.messages, "log": list(engine.log)[:100],
+            "keyboard": engine.transport.keyboard, "chat_admin": bool(engine.transport.chat_admins),
             "role": engine.store.role(bots.EMU_USER["id"], engine.compiled.admins),
             "roles": engine.compiled.all_roles(),
             "waiting": engine.waiters.get(f"{bots.EMU_CHAT}:{bots.EMU_USER['id']}") is not None,
@@ -1233,6 +1255,42 @@ def bot_user_role(pid: str, uid: str, body: BotUserIn):
     if live and bots.manager.loop:
         asyncio.run_coroutine_threadsafe(bots.sync_commands(live.engine), bots.manager.loop)
     return user
+
+
+class RefundIn(BaseModel):
+    charge_id: str
+
+
+@app.post("/api/projects/{pid}/bot/payments/refund")
+async def bot_refund(pid: str, body: RefundIn):
+    """Вернуть оплату звёздами из вкладки «Платежи»."""
+    from .telegram import TelegramError
+    project = _bot_project(pid)
+    store = bots.manager.store(pid)
+    payment = next((p for p in store.payments() if p.get("charge_id") == body.charge_id), None)
+    if payment is None:
+        raise HTTPException(404, "платёж не найден")
+    if payment.get("currency") != "XTR":
+        raise HTTPException(400, "из платформы возвращаются только Stars; оплату в валюте возвращает платёжный провайдер")
+    if payment.get("refunded"):
+        raise HTTPException(409, "уже возвращён")
+    live = bots.manager.live.get(pid)
+    if live:
+        transport = live.engine.transport
+    else:
+        try:
+            token = bots.manager.compiled_for(pid, project).token
+        except (GraphError, vault.VaultError) as e:
+            raise HTTPException(400, str(e)) from None
+        if not token:
+            raise HTTPException(400, "не задан токен бота")
+        transport = bots.TelegramTransport(token)
+    try:
+        await transport.refund(payment["user_id"], body.charge_id)
+    except TelegramError as e:
+        raise HTTPException(502, f"Telegram: {e}") from None
+    store.mark_refunded(body.charge_id)
+    return {"ok": True}
 
 
 @app.get("/api/projects/{pid}/bot/payments")

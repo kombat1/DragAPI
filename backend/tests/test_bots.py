@@ -337,3 +337,156 @@ def test_emulator_roles_and_test_payment(platform):
     assert inv["invoice"]["amount"] == 25 and "25 ⭐" in inv["text"]
     st = say(pay={"message_id": inv["id"]})
     assert st["messages"][-1]["text"] == "Спасибо! 25 ⭐, теперь вы vip" and st["role"] == "vip"
+
+
+def graph_group():
+    """Модерация группы, файлы, контакт, клавиатура, возврат."""
+    return {"name": "Модератор", "kind": "bot", "bot": {"roles": ["moderator"], "admins": []},
+            "nodes": [
+                # приветствие новичков
+                node("join", "bot_member", action="join"),
+                node("welcome", "bot_send", text="Добро пожаловать, {user_name}!", links=[], to="current"),
+                # антиспам на любое сообщение в группах
+                node("any", "bot_message", match="any", where="group"),
+                node("spam", "bot_filter", links=True, words=["казино"], caps=True, max_length="0",
+                     flood_count="3", flood_seconds="60", skip_admins=True, var="reason"),
+                node("del", "bot_moderate", action="delete", target="author", minutes="0", var="err"),
+                node("warn", "bot_send", text="{user_name}, удалено: {reason}", links=[], to="current"),
+                # /mute ответом на сообщение — только админам группы
+                node("mute", "bot_command", command="mute", where="group"),
+                node("chk", "condition", expr="is_chat_admin"),
+                node("do_mute", "bot_moderate", action="mute", target="reply", minutes="30", var="err"),
+                node("muted", "bot_send", text="{reply_user_name} помолчит 30 минут", links=[], to="current"),
+                node("mute_err", "bot_send", text="Ошибка: {err}", links=[], to="current"),
+                node("noadm", "bot_send", text="Только для админов группы", links=[], to="current"),
+                # личка: фото → переслать админу; контакт; клавиатура
+                node("photo", "bot_file", kind="photo", where="private"),
+                node("fwd", "bot_send_file", source="file", caption="от {user_name}", to="chat", chat="999"),
+                node("got", "bot_send", text="Фото {file['name']} получено", links=[], to="current"),
+                node("phone", "bot_command", command="phone", where="private"),
+                node("ask", "bot_ask", text="Ваш номер?", var="tel", type="contact", timeout="30",
+                     retry="Нажмите кнопку", button="📱 Номер"),
+                node("tel_ok", "bot_send", text="Номер {tel}", links=[], to="current"),
+                node("kb", "bot_command", command="kb", where="private"),
+                node("menu", "bot_menu", text="Выберите", keyboard="reply", columns="2", var="c", timeout="30",
+                     remove=True, buttons=[{"id": "x", "text": "Да"}, {"id": "y", "text": "Нет"}]),
+                node("yes", "bot_send", text="Выбрано: {c}", links=[], to="current")],
+            "edges": [edge("join", "welcome"), edge("any", "spam"), edge("spam", "del", "violation"),
+                      edge("del", "warn", "ok"), edge("mute", "chk"), edge("chk", "do_mute", "true"),
+                      edge("chk", "noadm", "false"), edge("do_mute", "muted", "ok"), edge("do_mute", "mute_err", "error"),
+                      edge("photo", "fwd"), edge("fwd", "got"), edge("phone", "ask"), edge("ask", "tel_ok", "ok"),
+                      edge("kb", "menu"), edge("menu", "yes", "x")]}
+
+
+def test_emulator_group_files_keyboard(platform):
+    c = platform
+    pid = c.post("/api/projects", json={"name": "М", "kind": "bot"}).json()["id"]
+    g = graph_group()
+
+    def say(**kw):
+        r = c.post(f"/api/projects/{pid}/bot/emulator", json={"graph": g, **kw})
+        assert r.status_code == 200, r.text
+        return r.json()
+
+    def bot(st):
+        return [m["text"] for m in st["messages"] if m["from"] in ("bot", "system")]
+
+    say(reset=True)
+    # вход в группу
+    assert bot(say(member="join", group=True, as_other=True))[-1] == "Добро пожаловать, Участник!"
+    # спам удаляется, причина видна
+    st = say(text="Заходите на casino.ru", group=True, as_other=True)
+    spam = [m for m in st["messages"] if m["from"] == "user"][-1]
+    assert spam["deleted"] and bot(st)[-1] == "Участник, удалено: ссылка"
+    assert bot(say(text="ВСЕ СЮДА БЫСТРО СМОТРИТЕ", group=True, as_other=True))[-1] == "Участник, удалено: капс"
+    ok = say(text="обычное сообщение", group=True, as_other=True)
+    target = [m for m in ok["messages"] if m["from"] == "user"][-1]
+    assert not target.get("deleted")
+    # /mute ответом: не админ группы — отказ; админ — мьют
+    assert bot(say(text="/mute", group=True, reply_to=target["id"]))[-1] == "Только для админов группы"
+    st = say(text="/mute", group=True, reply_to=target["id"], chat_admin=True)
+    assert "участник 2 замьючен до" in bot(st)[-2] and bot(st)[-1] == "Участник помолчит 30 минут"
+    st = say(text="/mute", group=True, chat_admin=True)
+    assert "ответом на сообщение" in bot(st)[-1]
+    # админ группы антиспамом не проверяется
+    st = say(text="КАПС ОТ АДМИНА ГРУППЫ ТУТ", group=True)
+    assert not [m for m in st["messages"] if m["from"] == "user"][-1].get("deleted")
+    # флуд: больше 3 сообщений за минуту
+    for i in range(3):
+        say(text=f"раз {i}", group=True, as_other=True)
+    assert "флуд" in bot(say(text="ещё", group=True, as_other=True))[-1]
+    # в личке: фото пересылается админу (в чат 999), команда группы в личке не работает
+    st = say(file={"name": "cat.png", "mime": "image/png", "size": 1234, "preview": "data:image/png;base64,AAAA"})
+    fwd = [m for m in st["messages"] if m["from"] == "bot" and m.get("media")][-1]
+    assert fwd["chat"] == "999" and fwd["media"]["kind"] == "photo" and fwd["text"] == "от Вы"
+    assert bot(st)[-1] == "Фото cat.png получено"
+    n = len(bot(st))
+    assert len(bot(say(text="/mute"))) == n
+    # контакт кнопкой
+    st = say(text="/phone")
+    assert st["keyboard"] == [[{"text": "📱 Номер", "request_contact": True}]]
+    assert bot(say(text="не скажу"))[-1] == "Нажмите кнопку"
+    st = say(contact=True)
+    assert bot(st)[-1] == "Номер +79000000000" and st["keyboard"] is None
+    # клавиатура под полем ввода: ответ приходит текстом кнопки
+    st = say(text="/kb")
+    assert st["keyboard"] == [[{"text": "Да"}, {"text": "Нет"}]]
+    assert bot(say(text="Да"))[-1] == "Выбрано: Да"
+
+
+def test_live_group_moderation_and_refund(platform, monkeypatch):
+    from app import telegram as tg
+    fake = FakeTelegram()
+    statuses = {}
+    orig = fake.handler
+
+    async def handler(request):
+        method = request.url.path.rsplit("/", 1)[-1]
+        if method == "getChatMember":
+            body = json.loads(request.content)
+            fake.calls.append((method, body))
+            return httpx.Response(200, json={"ok": True, "result": {"status": statuses.get(body["user_id"], "member")}})
+        return await orig(request)
+
+    monkeypatch.setattr(tg, "TRANSPORT", httpx.MockTransport(handler))
+    c = platform
+    pid = c.post("/api/projects", json={"name": "Группа", "kind": "bot"}).json()["id"]
+    g = {**graph_group(), "env": [{"key": "BOT_TOKEN", "value": "5:x", "secret": True}],
+         "bot": {**graph_group()["bot"], "token_env": "BOT_TOKEN"}}
+    assert c.put(f"/api/projects/{pid}", json=g).status_code == 200
+    assert c.post(f"/api/projects/{pid}/bot/start").status_code == 200
+    group = {"id": -500, "type": "supergroup", "title": "Чат"}
+
+    def gmsg(uid, name, text, mid, reply=None):
+        m = {"message_id": mid, "chat": group, "from": {"id": uid, "first_name": name}, "text": text}
+        if reply:
+            m["reply_to_message"] = reply
+        fake.push({"message": m})
+
+    fake.push({"message": {"message_id": 1, "chat": group, "from": {"id": 9, "first_name": "Новичок"},
+                           "new_chat_members": [{"id": 9, "first_name": "Новичок"}]}})
+    _wait(lambda: fake.texts(-500) and fake.texts(-500)[-1] == "Добро пожаловать, Новичок!")
+    gmsg(9, "Новичок", "купи в казино", 2)
+    _wait(lambda: any(m == "deleteMessage" and b == {"chat_id": "-500", "message_id": 2} for m, b in fake.calls))
+    _wait(lambda: fake.texts(-500)[-1] == "Новичок, удалено: стоп-слово «казино»")
+    statuses[1] = "administrator"
+    gmsg(1, "Админ", "/mute@bot", 3, reply={"message_id": 2, "from": {"id": 9, "first_name": "Новичок"}})
+    rc = _wait(lambda: next((b for m, b in fake.calls if m == "restrictChatMember"), None))
+    assert rc["user_id"] == 9 and rc["permissions"]["can_send_messages"] is False and rc["until_date"] > time.time() + 1700
+    _wait(lambda: fake.texts(-500)[-1] == "Новичок помолчит 30 минут")
+
+    # личка: фото → sendPhoto в чат 999 по file_id
+    fake.push({"message": {"message_id": 4, "chat": {"id": 9, "type": "private"}, "from": {"id": 9, "first_name": "Новичок"},
+                           "photo": [{"file_id": "small", "file_size": 10}, {"file_id": "big", "file_size": 999}],
+                           "caption": "смотри"}})
+    sp = _wait(lambda: next((b for m, b in fake.calls if m == "sendPhoto"), None))
+    assert sp == {"chat_id": "999", "photo": "big", "caption": "от Новичок"}
+
+    # возврат Stars из «Платежей»
+    bots.manager.store(pid).add_payment({"t": time.time(), "user_id": "9", "amount": 10, "currency": "XTR",
+                                         "charge_id": "ch-9", "payload": "p"})
+    assert c.post(f"/api/projects/{pid}/bot/payments/refund", json={"charge_id": "ch-9"}).json() == {"ok": True}
+    assert next(b for m, b in fake.calls if m == "refundStarPayment") == {"user_id": 9, "telegram_payment_charge_id": "ch-9"}
+    assert c.get(f"/api/projects/{pid}/bot/payments").json()[0]["refunded"]
+    assert c.post(f"/api/projects/{pid}/bot/payments/refund", json={"charge_id": "ch-9"}).status_code == 409
+    c.post(f"/api/projects/{pid}/bot/stop")

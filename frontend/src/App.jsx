@@ -25,8 +25,11 @@ import { newId } from './components/ProjectSettings.jsx'
 import { AgentsModal, RecordModal } from './components/Automation.jsx'
 
 
-const BRANCH_LABELS = { true: 'да', false: 'нет', body: 'тело', done: 'дальше', ok: 'ответ', timeout: 'нет ответа', not_found: 'не найден', paid: 'оплачено' }
-const isStart = (t) => t === 'endpoint' || t === 'trigger' || t === 'bot_command' || t === 'bot_message'
+const BRANCH_LABELS = {
+  true: 'да', false: 'нет', body: 'тело', done: 'дальше', ok: 'ответ', timeout: 'нет ответа', not_found: 'не найден',
+  paid: 'оплачено', error: 'ошибка', violation: 'нарушение',
+}
+const isStart = (t) => ['endpoint', 'trigger', 'bot_command', 'bot_message', 'bot_file', 'bot_member'].includes(t)
 const SPACES = [
   ['api', '🔌 API'],
   ['automation', '🤖 Автоматизация'],
@@ -85,8 +88,10 @@ function producedFields(n) {
   if ((n.type === 'repeat' || n.type === 'while') && n.data.var) out.push(n.data.var)
   if ((n.type === 'http' || n.type === 'autoclick') && n.data.target) out.push(n.data.target)
   // конструктор ботов
-  if (n.type === 'bot_command' || n.type === 'bot_message') out.push('text', 'args', 'user_name', 'username', 'user_id', 'chat_id', 'saved', 'role', 'is_admin')
-  if (['bot_ask', 'bot_menu', 'bot_role', 'bot_invoice'].includes(n.type) && n.data.var) out.push(n.data.var)
+  if (['bot_command', 'bot_message', 'bot_file', 'bot_member'].includes(n.type))
+    out.push('text', 'args', 'user_name', 'username', 'user_id', 'chat_id', 'saved', 'role', 'is_admin', 'is_group', 'is_chat_admin',
+      'chat_title', 'message_id', 'file', 'reply_user_id', 'reply_user_name', 'reply_message_id')
+  if (['bot_ask', 'bot_menu', 'bot_role', 'bot_invoice', 'bot_refund', 'bot_filter', 'bot_moderate'].includes(n.type) && n.data.var) out.push(n.data.var)
   if (n.type === 'bot_send' && n.data.to === 'role' && n.data.count_var) out.push(n.data.count_var)
   if (n.type === 'run_scenario' && n.data.target) out.push(n.data.target)
   return out
@@ -118,7 +123,8 @@ const cleanEdge = ({ selected, ...e }) => e // eslint-disable-line no-unused-var
 // Автораскладка: каждый эндпоинт (или «Старт») — строка слева направо, ветки — друг под другом.
 const BRANCHES = {
   condition: ['true', 'false'], tg_ask: ['true', 'false'], bot_ask: ['ok', 'timeout'], bot_role: ['ok', 'not_found'],
-  bot_invoice: ['paid', 'timeout'], repeat: ['body', 'done'], while: ['body', 'done'],
+  bot_invoice: ['paid', 'timeout'], bot_refund: ['ok', 'error'], bot_filter: ['violation', 'ok'], bot_moderate: ['ok', 'error'],
+  repeat: ['body', 'done'], while: ['body', 'done'],
 }
 const branchesOf = (n) => (n.type === 'bot_menu' ? [...(n.data.buttons || []).map((b) => b.id), 'timeout'] : BRANCHES[n.type])
 function autoLayout(nodes, edges) {
@@ -721,7 +727,8 @@ function Editor({ catalogs, projectId, onProjectsChanged, me }) {
   // «ok» у «Спросить» — «ответ», у «Назначить роль» — «готово»; «timeout» у счёта — «не оплачено»
   const branchLabel = (e) => {
     const src = nodes.find((n) => n.id === e.source)?.type
-    if (src === 'bot_role' && e.sourceHandle === 'ok') return 'готово'
+    if (['bot_role', 'bot_refund', 'bot_moderate'].includes(src) && e.sourceHandle === 'ok') return 'готово'
+    if (src === 'bot_filter' && e.sourceHandle === 'ok') return 'чисто'
     if (src === 'bot_invoice' && e.sourceHandle === 'timeout') return 'не оплачено'
     return BRANCH_LABELS[e.sourceHandle]
   }
