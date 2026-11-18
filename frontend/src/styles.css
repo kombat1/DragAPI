@@ -409,3 +409,7 @@ kbd { font-family: var(--mono); font-size: 11px; padding: 0 4px; border: 1px sol
   .emu-side { flex: none; }
   .spaces .space { padding: 5px 8px; }
 }
+.emu-button.pay { border-color: color-mix(in srgb, var(--ok) 50%, var(--border)); color: var(--ok); }
+.emu-role { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.role-banned { color: var(--danger); }
+.settings-h { margin: 18px 0 6px; font-size: 13px; }

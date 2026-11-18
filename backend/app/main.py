@@ -1127,6 +1127,8 @@ class EmulatorIn(BaseModel):
     graph: GraphIn | None = None
     text: str | None = None
     button: dict | None = None     # {message_id, data, text}
+    pay: dict | None = None        # {message_id} — «Оплатить (тест)»
+    as_role: str | None = None     # тестировать как admin / moderator / user
     reset: bool = False
 
 
@@ -1171,13 +1173,19 @@ async def bot_emulator(pid: str, body: EmulatorIn):
     except GraphError as e:
         raise HTTPException(400, {"message": "в графе бота есть ошибки", "issues": [i.as_dict() for i in e.issues]})
     engine = bots.manager.emulator(pid, compiled, reset=body.reset)
-    if body.text is not None or body.button is not None:
-        await bots.emulate(engine, body.text, body.button)
+    if body.as_role:
+        if body.as_role not in compiled.all_roles():
+            raise HTTPException(400, f"неизвестная роль «{body.as_role}»")
+        engine.store.set_role(bots.EMU_USER["id"], body.as_role)
+    if body.text is not None or body.button is not None or body.pay is not None:
+        await bots.emulate(engine, body.text, body.button, pay=body.pay)
     return _emulator_state(engine)
 
 
 def _emulator_state(engine) -> dict:
     return {"messages": engine.transport.messages, "log": list(engine.log)[:100],
+            "role": engine.store.role(bots.EMU_USER["id"], engine.compiled.admins),
+            "roles": engine.compiled.all_roles(),
             "waiting": engine.waiters.get(f"{bots.EMU_CHAT}:{bots.EMU_USER['id']}") is not None,
             "saved": (engine.store.data["users"].get(str(bots.EMU_USER["id"])) or {}).get("saved", {})}
 
@@ -1191,8 +1199,46 @@ def bot_emulator_state(pid: str):
 
 @app.get("/api/projects/{pid}/bot/users")
 def bot_users(pid: str):
+    project = _bot_project(pid)
+    try:
+        admins = bots.manager.compiled_for(pid, project).admins
+    except (GraphError, vault.VaultError):
+        admins = [str(a) for a in (project.get("bot") or {}).get("admins") or []]
+    # итоговая роль: администраторы из настроек — admin независимо от сохранённой
+    return [{**u, "role": "admin" if u["id"] in admins else u.get("role") or "user", "settings_admin": u["id"] in admins}
+            for u in bots.manager.store(pid).users()]
+
+
+class BotUserIn(BaseModel):
+    role: str
+
+
+@app.put("/api/projects/{pid}/bot/users/{uid}")
+def bot_user_role(pid: str, uid: str, body: BotUserIn):
+    """Сменить роль пользователя бота (в т.ч. admin и banned) из платформы."""
+    project = _bot_project(pid)
+    try:
+        compiled = bots.manager.compiled_for(pid, project)
+    except (GraphError, vault.VaultError) as e:
+        raise HTTPException(400, f"исправьте ошибки в графе: {e}") from None
+    if body.role not in compiled.all_roles():
+        raise HTTPException(400, f"неизвестная роль «{body.role}»")
+    if uid in compiled.admins and body.role != "admin":
+        raise HTTPException(400, "этот пользователь — администратор из настроек бота; уберите его ID там")
+    store = bots.manager.store(pid)
+    if store.find(uid) is None:
+        raise HTTPException(404, "пользователь не найден")
+    user = store.set_role(uid, body.role)
+    live = bots.manager.live.get(pid)
+    if live and bots.manager.loop:
+        asyncio.run_coroutine_threadsafe(bots.sync_commands(live.engine), bots.manager.loop)
+    return user
+
+
+@app.get("/api/projects/{pid}/bot/payments")
+def bot_payments(pid: str):
     _bot_project(pid)
-    return bots.manager.store(pid).users()
+    return bots.manager.store(pid).payments()
 
 
 @app.delete("/api/projects/{pid}/bot/users")

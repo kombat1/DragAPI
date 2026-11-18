@@ -3,7 +3,7 @@ import TestsPanel from './TestsPanel.jsx'
 import { api } from '../api.js'
 import { NetworkEvents } from './Inspector.jsx'
 import { RunsPanel } from './Automation.jsx'
-import { BotLog, BotUsers, EmulatorPanel } from './Bots.jsx'
+import { BotLog, BotPayments, BotUsers, EmulatorPanel } from './Bots.jsx'
 
 const fmtTime = (t) => new Date(t * 1000).toLocaleTimeString()
 
@@ -269,6 +269,7 @@ export default function BottomPanel({
               ['emulator', 'Тест-чат'],
               ['botlog', `Журнал${botProps.running ? ' ●' : ''}`],
               ['users', 'Пользователи'],
+              ['payments', 'Платежи'],
               ['issues', `Проблемы${issues.length ? ` (${issues.length})` : ''}`],
               ['versions', 'История версий'],
             ]
@@ -308,7 +309,8 @@ export default function BottomPanel({
             </div>
           )}
           {botProps && tab === 'botlog' && <BotLog projectId={projectId} onSelectNode={onSelectNode} />}
-          {botProps && tab === 'users' && <BotUsers projectId={projectId} readOnly={botProps.readOnly} />}
+          {botProps && tab === 'users' && <BotUsers projectId={projectId} readOnly={botProps.readOnly} roles={botProps.roles} />}
+          {botProps && tab === 'payments' && <BotPayments projectId={projectId} />}
           {runsProps && (
             <div style={{ display: tab === 'runs' ? undefined : 'none', height: '100%' }}>
               <RunsPanel projectId={projectId} onSelectNode={onSelectNode} {...runsProps} />

@@ -81,6 +81,8 @@ export const api = {
   botEmulator: (pid, body) => request('POST', `/api/projects/${pid}/bot/emulator`, body),
   botEmulatorState: (pid) => request('GET', `/api/projects/${pid}/bot/emulator`),
   botUsers: (pid) => request('GET', `/api/projects/${pid}/bot/users`),
+  botSetRole: (pid, uid, role) => request('PUT', `/api/projects/${pid}/bot/users/${uid}`, { role }),
+  botPayments: (pid) => request('GET', `/api/projects/${pid}/bot/payments`),
   botUsersClear: (pid) => request('DELETE', `/api/projects/${pid}/bot/users`),
   // автоматизация
   automationCatalog: () => request('GET', '/api/automation/catalog'),

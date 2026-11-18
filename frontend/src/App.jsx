@@ -25,7 +25,7 @@ import { newId } from './components/ProjectSettings.jsx'
 import { AgentsModal, RecordModal } from './components/Automation.jsx'
 
 
-const BRANCH_LABELS = { true: 'да', false: 'нет', body: 'тело', done: 'дальше', ok: 'ответ', timeout: 'нет ответа' }
+const BRANCH_LABELS = { true: 'да', false: 'нет', body: 'тело', done: 'дальше', ok: 'ответ', timeout: 'нет ответа', not_found: 'не найден', paid: 'оплачено' }
 const isStart = (t) => t === 'endpoint' || t === 'trigger' || t === 'bot_command' || t === 'bot_message'
 const SPACES = [
   ['api', '🔌 API'],
@@ -85,8 +85,9 @@ function producedFields(n) {
   if ((n.type === 'repeat' || n.type === 'while') && n.data.var) out.push(n.data.var)
   if ((n.type === 'http' || n.type === 'autoclick') && n.data.target) out.push(n.data.target)
   // конструктор ботов
-  if (n.type === 'bot_command' || n.type === 'bot_message') out.push('text', 'args', 'user_name', 'username', 'user_id', 'chat_id', 'saved')
-  if ((n.type === 'bot_ask' || n.type === 'bot_menu') && n.data.var) out.push(n.data.var)
+  if (n.type === 'bot_command' || n.type === 'bot_message') out.push('text', 'args', 'user_name', 'username', 'user_id', 'chat_id', 'saved', 'role', 'is_admin')
+  if (['bot_ask', 'bot_menu', 'bot_role', 'bot_invoice'].includes(n.type) && n.data.var) out.push(n.data.var)
+  if (n.type === 'bot_send' && n.data.to === 'role' && n.data.count_var) out.push(n.data.count_var)
   if (n.type === 'run_scenario' && n.data.target) out.push(n.data.target)
   return out
 }
@@ -115,7 +116,10 @@ const cleanNode = ({ selected, dragging, measured, resizing, ...n }) => n // esl
 const cleanEdge = ({ selected, ...e }) => e // eslint-disable-line no-unused-vars
 
 // Автораскладка: каждый эндпоинт (или «Старт») — строка слева направо, ветки — друг под другом.
-const BRANCHES = { condition: ['true', 'false'], tg_ask: ['true', 'false'], bot_ask: ['ok', 'timeout'], repeat: ['body', 'done'], while: ['body', 'done'] }
+const BRANCHES = {
+  condition: ['true', 'false'], tg_ask: ['true', 'false'], bot_ask: ['ok', 'timeout'], bot_role: ['ok', 'not_found'],
+  bot_invoice: ['paid', 'timeout'], repeat: ['body', 'done'], while: ['body', 'done'],
+}
 const branchesOf = (n) => (n.type === 'bot_menu' ? [...(n.data.buttons || []).map((b) => b.id), 'timeout'] : BRANCHES[n.type])
 function autoLayout(nodes, edges) {
   const COL = 290
@@ -714,6 +718,13 @@ function Editor({ catalogs, projectId, onProjectsChanged, me }) {
   )
 
   // подписи «да»/«нет» на связях из условия
+  // «ok» у «Спросить» — «ответ», у «Назначить роль» — «готово»; «timeout» у счёта — «не оплачено»
+  const branchLabel = (e) => {
+    const src = nodes.find((n) => n.id === e.source)?.type
+    if (src === 'bot_role' && e.sourceHandle === 'ok') return 'готово'
+    if (src === 'bot_invoice' && e.sourceHandle === 'timeout') return 'не оплачено'
+    return BRANCH_LABELS[e.sourceHandle]
+  }
   const viewEdges = useMemo(() => {
     // связи, по которым прошёл тестовый запрос (до текущего шага)
     const passed = new Set()
@@ -727,7 +738,7 @@ function Editor({ catalogs, projectId, onProjectsChanged, me }) {
         ...e,
         animated: onPath,
         className: [branch ? `branch-${e.sourceHandle}` : '', onPath ? 'on-path' : ''].join(' '),
-        ...(branch ? { label: menuLabel || BRANCH_LABELS[e.sourceHandle], labelBgPadding: [4, 2] } : {}),
+        ...(branch ? { label: menuLabel || branchLabel(e), labelBgPadding: [4, 2] } : {}),
       }
     })
   }, [edges, debug, runVisited, nodes])
@@ -913,6 +924,7 @@ function Editor({ catalogs, projectId, onProjectsChanged, me }) {
           firewall={firewall}
           projectId={projectId}
           agent={automation.agent}
+          botRoles={bot.roles ?? ['moderator']}
           sandboxInfo={sandboxInfo}
           onOpenSettings={(tab) => setSettingsOpen(tab || (isAuto ? 'automation' : isBot ? 'bot' : 'models'))}
           onTestEndpoint={(id) => {
@@ -935,7 +947,7 @@ function Editor({ catalogs, projectId, onProjectsChanged, me }) {
         models={models}
         tab={bottomTab}
         setTab={setBottomTab}
-        botProps={isBot ? { graph, readOnly, running: !!botState?.running, onTrace: setActiveNodes } : null}
+        botProps={isBot ? { graph, readOnly, running: !!botState?.running, onTrace: setActiveNodes, roles: bot.roles ?? ['moderator'] } : null}
         runsProps={
           isAuto
             ? {

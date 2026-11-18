@@ -60,6 +60,11 @@ export function EmulatorPanel({ projectId, graph, readOnly, onSelectNode, onTrac
           {state.messages.map((m) => (
             <div key={m.id} className={`bubble ${m.from}`}>
               {m.photo && <img src={m.photo} alt="" className="emu-photo" />}
+              {m.invoice && (
+                <button className="emu-button pay" disabled={readOnly || busy || !!m.note} onClick={() => send({ pay: { message_id: m.id } })}>
+                  💳 Оплатить (тест)
+                </button>
+              )}
               {m.text && <div className="bubble-text">{m.text}</div>}
               {(m.buttons || []).map((b) => (
                 <button
@@ -90,6 +95,17 @@ export function EmulatorPanel({ projectId, graph, readOnly, onSelectNode, onTrac
             ⟲
           </button>
         </form>
+        <div className="emu-role muted">
+          Тестировать как{' '}
+          <select value={state.role || 'user'} onChange={(e) => send({ as_role: e.target.value })} disabled={readOnly || busy}>
+            {(state.roles || ['admin', 'user']).map((r) => (
+              <option key={r} value={r}>
+                {r}
+              </option>
+            ))}
+          </select>{' '}
+          — так проверяются команды для ролей и бан.
+        </div>
         {error && <div className="issue error">{error}</div>}
       </div>
       <div className="emu-side">
@@ -145,7 +161,7 @@ export function BotLog({ projectId, onSelectNode }) {
 
 // ---------- пользователи бота ----------
 
-export function BotUsers({ projectId, readOnly }) {
+export function BotUsers({ projectId, readOnly, roles = [] }) {
   const [users, setUsers] = useState(null)
   const load = () => api.botUsers(projectId).then(setUsers).catch(() => setUsers([]))
   useEffect(() => {
@@ -179,6 +195,7 @@ export function BotUsers({ projectId, readOnly }) {
             <th>@username</th>
             <th>Сообщений</th>
             <th>Последнее</th>
+            <th>Роль</th>
             <th>saved</th>
           </tr>
         </thead>
@@ -190,6 +207,28 @@ export function BotUsers({ projectId, readOnly }) {
               <td>{u.username}</td>
               <td>{u.messages}</td>
               <td>{new Date(u.last_seen * 1000).toLocaleString()}</td>
+              <td>
+                <select
+                  value={u.role || 'user'}
+                  disabled={readOnly || u.settings_admin}
+                  title={u.settings_admin ? 'Администратор из настроек бота — меняется там' : undefined}
+                  className={u.role === 'banned' ? 'role-banned' : ''}
+                  onChange={async (e) => {
+                    try {
+                      await api.botSetRole(projectId, u.id, e.target.value)
+                    } catch (err) {
+                      alert(err.message)
+                    }
+                    load()
+                  }}
+                >
+                  {['admin', ...roles, 'user', 'banned'].map((r) => (
+                    <option key={r} value={r}>
+                      {r === 'banned' ? '🚫 banned' : r}
+                    </option>
+                  ))}
+                </select>
+              </td>
               <td className="mono">{JSON.stringify(u.saved || {})}</td>
             </tr>
           ))}
@@ -201,8 +240,39 @@ export function BotUsers({ projectId, readOnly }) {
 
 // ---------- настройки → Бот ----------
 
+function ChipsInput({ items, onChange, placeholder, validate }) {
+  const [error, setError] = useState(null)
+  return (
+    <div className="chips">
+      {items.map((c) => (
+        <span key={c} className="chip on">
+          {c}
+          <button className="icon" title="Убрать" onClick={() => onChange(items.filter((x) => x !== c))}>
+            ×
+          </button>
+        </span>
+      ))}
+      <input
+        className="mono chat-input"
+        placeholder={placeholder}
+        onKeyDown={(e) => {
+          if (e.key !== 'Enter' || !e.target.value.trim()) return
+          e.preventDefault()
+          const v = e.target.value.trim()
+          const problem = validate?.(v)
+          if (problem) return setError(problem)
+          setError(null)
+          if (!items.includes(v)) onChange([...items, v])
+          e.target.value = ''
+        }}
+      />
+      {error && <span className="issue error">{error}</span>}
+    </div>
+  )
+}
+
 export function BotTab({ bot, setBot, env, setEnv }) {
-  const b = { token_env: '', ...bot }
+  const b = { token_env: '', roles: ['moderator'], admins: [], deny_text: 'Нет доступа', payments_env: '', ...bot }
   const envKeys = env.map((e) => e.key).filter(Boolean)
   const tokenVar = env.find((e) => e.key === b.token_env)
   return (
@@ -256,8 +326,48 @@ export function BotTab({ bot, setBot, env, setEnv }) {
           />
         </label>
       )}
+      <h4 className="settings-h">Роли и админка</h4>
+      <div className="field">
+        <div className="field-label">Администраторы (Telegram ID)</div>
+        <ChipsInput items={b.admins} onChange={(admins) => setBot({ ...b, admins })} placeholder="ID + Enter" validate={(v) => (/^\d{1,20}$/.test(v) ? null : 'ID — число')} />
+        <div className="hint">
+          Админам доступны все команды. Свой ID проще всего узнать так: напишите боту — вы появитесь во вкладке
+          «Пользователи»; там же можно выдать роль admin без правки настроек.
+        </div>
+      </div>
+      <div className="field">
+        <div className="field-label">Свои роли</div>
+        <ChipsInput items={b.roles} onChange={(roles) => setBot({ ...b, roles })} placeholder="роль + Enter"
+          validate={(v) => (/^[a-z][a-z0-9_]{0,31}$/.test(v) ? (['admin', 'user', 'banned'].includes(v) ? 'это встроенная роль' : null) : 'латиница в нижнем регистре, цифры и _')} />
+        <div className="hint">
+          Встроенные: <code>admin</code>, <code>user</code> (все остальные), <code>banned</code> (бот игнорирует). Роль выдаётся
+          блоком «Назначить роль» или во вкладке «Пользователи»; у «Команды» и «Сообщения» — поле «Доступна ролям». Команды
+          для ролей видны в меню Telegram только тем, у кого роль есть.
+        </div>
+      </div>
+      <label className="field">
+        <span className="field-label">Ответ, если нет доступа</span>
+        <input value={b.deny_text} onChange={(e) => setBot({ ...b, deny_text: e.target.value })} />
+      </label>
+      <h4 className="settings-h">Оплата</h4>
+      <p className="hint">
+        Блок «Счёт на оплату». <b>⭐ Telegram Stars</b> работают сразу, без договора с банком (подходят для цифровых товаров и
+        услуг). Для рублей, долларов и евро подключите провайдера в @BotFather (<code>/mybots → Payments</code>, например
+        ЮKassa) и сохраните выданный токен в секретную переменную:
+      </p>
+      <label className="field">
+        <span className="field-label">Токен платёжного провайдера — переменная</span>
+        <select value={b.payments_env} onChange={(e) => setBot({ ...b, payments_env: e.target.value })}>
+          <option value="">— только Telegram Stars —</option>
+          {envKeys.map((k) => (
+            <option key={k} value={k}>
+              {k}
+            </option>
+          ))}
+        </select>
+      </label>
       <div className="hint">
-        Переменные в блоках: <code>text</code> — текст сообщения, <code>args</code> — текст после команды, <code>user_name</code>,{' '}
+        Переменные в блоках: <code>role</code>, <code>is_admin</code>, <code>text</code> — текст сообщения, <code>args</code> — текст после команды, <code>user_name</code>,{' '}
         <code>username</code>, <code>user_id</code>, <code>chat_id</code>, <code>saved['ключ']</code> — сохранённое блоком «Запомнить».
       </div>
     </section>
@@ -313,5 +423,54 @@ export function AutomationProjectSelect({ value, onChange }) {
       ))}
       {value && !projects.some((p) => p.id === value) && <option value={value}>{value}</option>}
     </select>
+  )
+}
+
+// ---------- платежи ----------
+
+export function BotPayments({ projectId }) {
+  const [items, setItems] = useState(null)
+  useEffect(() => {
+    let alive = true
+    const load = () => api.botPayments(projectId).then((p) => alive && setItems(p)).catch(() => alive && setItems([]))
+    load()
+    const t = setInterval(load, 4000)
+    return () => {
+      alive = false
+      clearInterval(t)
+    }
+  }, [projectId])
+  if (!items) return null
+  if (!items.length) return <div className="muted pad">Оплат пока не было. Тестовые оплаты из тест-чата сюда не попадают.</div>
+  const totals = items.reduce((acc, p) => ({ ...acc, [p.currency]: (acc[p.currency] || 0) + p.amount }), {})
+  const fmt = (amount, cur) => (cur === 'XTR' ? `${amount} ⭐` : `${(amount / 100).toFixed(2)} ${cur}`)
+  return (
+    <div className="data-table-wrap">
+      <div className="muted">
+        Всего: {Object.entries(totals).map(([cur, sum]) => fmt(sum, cur)).join(', ')} · платежей {items.length}
+      </div>
+      <table className="data-table">
+        <thead>
+          <tr>
+            <th>Когда</th>
+            <th>Пользователь</th>
+            <th>Сумма</th>
+            <th>ID платежа Telegram</th>
+          </tr>
+        </thead>
+        <tbody>
+          {items.map((p, i) => (
+            <tr key={i}>
+              <td>{new Date(p.t * 1000).toLocaleString()}</td>
+              <td>
+                {p.user_name} <span className="muted">{p.user_id}</span>
+              </td>
+              <td>{fmt(p.amount, p.currency)}</td>
+              <td className="mono">{p.charge_id}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   )
 }

@@ -46,7 +46,7 @@ def test_compile_routes_and_errors():
     assert p.route("/start@MyBot")[0].node == "start"
     assert p.route("Привет всем")[0].node == "hi"          # «содержит» важнее «любого»
     assert p.route("что-то")[0].node == "any"
-    assert {"kind": "command", "value": "start", "description": "Начать", "node": "start"} in p.summary()
+    assert {"kind": "command", "value": "start", "description": "Начать", "node": "start", "roles": []} in p.summary()
     assert any("токен бота не задан" in w.message for w in p.warnings)
 
     g = graph_form()
@@ -200,3 +200,140 @@ def test_bot_runs_automation_scenario(platform):
         assert runs[0]["source"] == "bot"
     finally:
         ctx.__exit__(None, None, None)
+
+
+def graph_admin():
+    """Роли: /panel — только админам и модераторам, /mod @user — назначить модератора, /ban, рассылка, оплата."""
+    return {"name": "Админка", "kind": "bot",
+            "bot": {"roles": ["moderator", "vip"], "admins": ["500"], "deny_text": "Только для своих"},
+            "nodes": [node("start", "bot_command", command="start"),
+                      node("hello", "bot_send", text="Роль: {role}, админ: {is_admin}", links=[], to="current"),
+                      node("panel", "bot_command", command="panel", roles=["moderator"]),
+                      node("panel_send", "bot_send", text="Панель", links=[], to="current"),
+                      node("mod", "bot_command", command="mod", roles=["admin"]),
+                      node("set", "bot_role", target="{args}", role="moderator", var="who"),
+                      node("ok", "bot_send", text="{who['name']} теперь {who['role']}", links=[], to="current"),
+                      node("nf", "bot_send", text="Не нашёл {args}", links=[], to="current"),
+                      node("ban", "bot_command", command="ban", roles=["admin", "moderator"]),
+                      node("setban", "bot_role", target="{args}", role="banned", var=""),
+                      node("news", "bot_command", command="news", roles=["admin"]),
+                      node("bc", "bot_send", text="Новость: {args}", links=[], to="role", role="all", count_var="n"),
+                      node("bc_done", "bot_send", text="Отправлено: {n}", links=[], to="current"),
+                      node("buy", "bot_command", command="buy"),
+                      node("inv", "bot_invoice", title="VIP", description="Доступ", amount="25", currency="XTR",
+                           timeout="30", var="payment"),
+                      node("vip", "bot_role", target="", role="vip", var=""),
+                      node("thanks", "bot_send", text="Спасибо! {payment['amount']} ⭐, теперь вы {role}", links=[], to="current"),
+                      node("unpaid", "bot_send", text="Не оплачено", links=[], to="current")],
+            "edges": [edge("start", "hello"), edge("panel", "panel_send"), edge("mod", "set"),
+                      edge("set", "ok", "ok"), edge("set", "nf", "not_found"), edge("ban", "setban"),
+                      edge("news", "bc"), edge("bc", "bc_done"), edge("buy", "inv"),
+                      edge("inv", "vip", "paid"), edge("vip", "thanks", "ok"), edge("inv", "unpaid", "timeout")]}
+
+
+def test_roles_compile_rules():
+    g = graph_admin()
+    p = compile_bot(g)
+    assert p.commands["panel"].roles == ["moderator"] and p.all_roles() == ["admin", "moderator", "vip", "user", "banned"]
+    g["nodes"][2]["data"]["roles"] = ["ghost"]
+    g["nodes"][14]["data"]["currency"] = "RUB"
+    g["bot"]["admins"] = ["abc"]
+    with pytest.raises(GraphError) as e:
+        compile_bot(g)
+    text = " | ".join(i.message for i in e.value.issues)
+    assert "неизвестная роль «ghost»" in text and "провайдера" in text and "ID администратора" in text
+
+
+def test_live_bot_roles_broadcast_payments(platform, monkeypatch):
+    from app import telegram as tg
+    fake = FakeTelegram()
+    monkeypatch.setattr(tg, "TRANSPORT", httpx.MockTransport(fake.handler))
+    c = platform
+    pid = c.post("/api/projects", json={"name": "Админка", "kind": "bot"}).json()["id"]
+    g = {**graph_admin(), "env": [{"key": "BOT_TOKEN", "value": "1:x", "secret": True}],
+         "bot": {**graph_admin()["bot"], "token_env": "BOT_TOKEN"}}
+    assert c.put(f"/api/projects/{pid}", json=g).status_code == 200
+    assert c.post(f"/api/projects/{pid}/bot/start").status_code == 200
+
+    names = {7: "ira", 8: "oleg"}
+
+    def msg(uid, name, text, username=None):
+        username = username or names.get(uid)
+        fake.push({"message": {"chat": {"id": uid}, "from": {"id": uid, "first_name": name, "username": username},
+                               "text": text}})
+
+    def last(uid):
+        return _wait(lambda: fake.texts(uid) and fake.texts(uid)[-1])
+
+    msg(500, "Админ", "/start"); assert last(500) == "Роль: admin, админ: True"
+    msg(7, "Ира", "/start", "ira"); assert last(7) == "Роль: user, админ: False"
+    msg(8, "Олег", "/start", "oleg"); assert last(8) == "Роль: user, админ: False"
+    msg(7, "Ира", "/panel"); _wait(lambda: fake.texts(7)[-1] == "Только для своих")
+    msg(7, "Ира", "/mod @oleg"); _wait(lambda: len(fake.texts(7)) == 3 and fake.texts(7)[-1] == "Только для своих")
+    # админ делает Иру модератором по @username
+    msg(500, "Админ", "/mod @ira"); _wait(lambda: fake.texts(500)[-1] == "Ира теперь moderator")
+    msg(500, "Админ", "/mod @nobody"); _wait(lambda: fake.texts(500)[-1] == "Не нашёл @nobody")
+    msg(7, "Ира", "/panel"); _wait(lambda: fake.texts(7)[-1] == "Панель")
+    # меню команд для ролей — только в их чатах
+    _wait(lambda: any(b.get("scope", {}).get("chat_id") == "7" for m, b in fake.calls if m == "setMyCommands"))
+    scoped = [b for m, b in fake.calls if m == "setMyCommands" and (b.get("scope") or {}).get("chat_id") == "7"][-1]
+    assert {c_["command"] for c_ in scoped["commands"]} >= {"panel", "ban", "start", "buy"} and \
+        "mod" not in {c_["command"] for c_ in scoped["commands"]}
+    public = [b for m, b in fake.calls if m == "setMyCommands" and not b.get("scope")][-1]
+    assert {c_["command"] for c_ in public["commands"]} == {"start", "buy"}
+    # модератор банит Олега — бот его больше не слышит
+    msg(7, "Ира", "/ban 8"); _wait(lambda: c.get(f"/api/projects/{pid}/bot/users").json() and
+                                    any(u["id"] == "8" and u.get("role") == "banned"
+                                        for u in c.get(f"/api/projects/{pid}/bot/users").json()))
+    n = len(fake.texts(8))
+    msg(8, "Олег", "/start"); time.sleep(0.5)
+    assert len(fake.texts(8)) == n
+    # рассылка всем (кроме заблокированных)
+    msg(500, "Админ", "/news Завтра акция"); _wait(lambda: fake.texts(500)[-1] == "Отправлено: 2")
+    assert fake.texts(7)[-1] == "Новость: Завтра акция" and fake.texts(8)[-1] != "Новость: Завтра акция"
+
+    # оплата звёздами: счёт → pre_checkout (суммы сверяются) → successful_payment → роль vip
+    msg(7, "Ира", "/buy")
+    inv = _wait(lambda: next((b for m, b in fake.calls if m == "sendInvoice"), None))
+    assert inv["currency"] == "XTR" and inv["prices"][0]["amount"] == 25 and inv["provider_token"] == ""
+    fake.push({"pre_checkout_query": {"id": "bad", "from": {"id": 7, "first_name": "Ира"}, "currency": "XTR",
+                                      "total_amount": 1, "invoice_payload": inv["payload"]}})
+    _wait(lambda: any(m == "answerPreCheckoutQuery" and b["pre_checkout_query_id"] == "bad" for m, b in fake.calls))
+    assert next(b for m, b in fake.calls if m == "answerPreCheckoutQuery" and b["pre_checkout_query_id"] == "bad")["ok"] is False
+    fake.push({"pre_checkout_query": {"id": "good", "from": {"id": 7, "first_name": "Ира"}, "currency": "XTR",
+                                      "total_amount": 25, "invoice_payload": inv["payload"]}})
+    _wait(lambda: any(m == "answerPreCheckoutQuery" and b["pre_checkout_query_id"] == "good" and b["ok"] for m, b in fake.calls))
+    fake.push({"message": {"chat": {"id": 7}, "from": {"id": 7, "first_name": "Ира"}, "successful_payment": {
+        "currency": "XTR", "total_amount": 25, "invoice_payload": inv["payload"], "telegram_payment_charge_id": "ch1"}}})
+    _wait(lambda: fake.texts(7)[-1] == "Спасибо! 25 ⭐, теперь вы vip")
+    pays = c.get(f"/api/projects/{pid}/bot/payments").json()
+    assert pays[0]["amount"] == 25 and pays[0]["charge_id"] == "ch1" and pays[0]["user_id"] == "7"
+
+    # роль из платформы
+    r = c.put(f"/api/projects/{pid}/bot/users/8", json={"role": "user"})
+    assert r.status_code == 200 and "role" not in r.json()
+    assert c.put(f"/api/projects/{pid}/bot/users/500", json={"role": "user"}).status_code == 400
+    assert c.put(f"/api/projects/{pid}/bot/users/8", json={"role": "ghost"}).status_code == 400
+    c.post(f"/api/projects/{pid}/bot/stop")
+
+
+def test_emulator_roles_and_test_payment(platform):
+    c = platform
+    pid = c.post("/api/projects", json={"name": "Э", "kind": "bot"}).json()["id"]
+    g = graph_admin()
+
+    def say(**kw):
+        r = c.post(f"/api/projects/{pid}/bot/emulator", json={"graph": g, **kw})
+        assert r.status_code == 200, r.text
+        return r.json()
+
+    st = say(reset=True)
+    assert st["role"] == "user" and "vip" in st["roles"]
+    assert say(text="/panel")["messages"][-1]["text"] == "Только для своих"
+    st = say(text="/panel", as_role="moderator")
+    assert st["messages"][-1]["text"] == "Панель" and st["role"] == "moderator"
+    st = say(text="/buy", as_role="user")
+    inv = st["messages"][-1]
+    assert inv["invoice"]["amount"] == 25 and "25 ⭐" in inv["text"]
+    st = say(pay={"message_id": inv["id"]})
+    assert st["messages"][-1]["text"] == "Спасибо! 25 ⭐, теперь вы vip" and st["role"] == "vip"

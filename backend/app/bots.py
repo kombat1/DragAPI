@@ -40,6 +40,12 @@ COMMAND_RE = re.compile(r"^[a-z0-9_]{1,32}$")
 MAX_STEPS = 2000
 WAIT_LIMIT = 7 * 86400
 
+ROLE_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
+BUILTIN_ROLES = ["admin", "user", "banned"]
+CURRENCIES = [["XTR", "⭐ Telegram Stars"], ["RUB", "RUB — рубли"], ["USD", "USD — доллары"], ["EUR", "EUR — евро"]]
+ROLES_FIELD = dict(key="roles", label="Доступна ролям", kind="roles", optional=True,
+                   hint="Пусто — всем. Администраторы проходят всегда. Остальным бот ответит текстом из настроек.")
+
 ROUTE_OPTS = [["any", "Любое сообщение"], ["equals", "Текст равен"], ["contains", "Текст содержит"],
               ["regex", "Регулярное выражение"]]
 
@@ -51,7 +57,8 @@ BOT_BLOCKS: dict[str, dict] = {
         "defaults": {"command": "start", "description": "Начать"},
         "fields": [F(key="command", label="Команда (без /)", kind="text",
                      hint="Латиница в нижнем регистре, цифры и _. Появится в меню бота."),
-                   F(key="description", label="Описание в меню", kind="text", optional=True)],
+                   F(key="description", label="Описание в меню", kind="text", optional=True),
+                   F(**ROLES_FIELD)],
     },
     "bot_message": {
         "title": "Сообщение", "group": "События", "color": "#229ED9", "icon": "✉",
@@ -62,17 +69,25 @@ BOT_BLOCKS: dict[str, dict] = {
                    F(key="pattern", label="Текст или выражение", kind="text",
                      show_if={"match": ["equals", "contains", "regex"]}),
                    F(key="ignore_case", label="Без учёта регистра", kind="bool",
-                     show_if={"match": ["equals", "contains", "regex"]})],
+                     show_if={"match": ["equals", "contains", "regex"]}),
+                   F(**ROLES_FIELD)],
     },
     "bot_send": {
         "title": "Отправить сообщение", "group": "Сообщения", "color": "#0ea5e9", "icon": "💬",
-        "description": "Текст с {переменными}; можно добавить кнопки-ссылки и отправить в другой чат (например, админу).",
+        "description": "Текст с {переменными} и кнопками-ссылками — в этот чат, в другой или рассылкой по роли.",
         "inputs": ["flow"], "output": ["flow"],
-        "defaults": {"text": "Привет, {user_name}!", "links": [], "chat": ""},
+        "defaults": {"text": "Привет, {user_name}!", "links": [], "to": "current", "chat": "", "role": "admin",
+                     "count_var": ""},
         "fields": [F(key="text", label="Текст", kind="template", multiline=True),
                    F(key="links", label="Кнопки-ссылки", kind="links"),
-                   F(key="chat", label="В чат (ID или выражение в {…})", kind="template", optional=True,
-                     hint="Пусто — в текущий чат. Например, ID администратора: 123456789")],
+                   F(key="to", label="Кому", kind="select", options=[
+                       ["current", "В этот чат"], ["chat", "В чат по ID"], ["role", "Всем с ролью (рассылка)"]]),
+                   F(key="chat", label="ID чата (или {выражение})", kind="template", show_if={"to": ["chat"]},
+                     hint="Например, ID администратора: 123456789"),
+                   F(key="role", label="Роль получателей", kind="role_any", show_if={"to": ["role"]},
+                     hint="«все пользователи» — рассылка всем, кто писал боту (кроме заблокированных)"),
+                   F(key="count_var", label="Число отправленных — в переменную", kind="text", optional=True,
+                     show_if={"to": ["role"]})],
     },
     "bot_photo": {
         "title": "Отправить фото", "group": "Сообщения", "color": "#0ea5e9", "icon": "🖼",
@@ -110,6 +125,34 @@ BOT_BLOCKS: dict[str, dict] = {
                    F(key="var", label="Нажатая кнопка (текст) — в переменную", kind="text", optional=True),
                    F(key="remove", label="Убрать кнопки после нажатия", kind="bool"),
                    F(key="timeout", label="Ждать, с", kind="num")],
+    },
+    "bot_role": {
+        "title": "Назначить роль", "group": "Админка", "color": "#9333ea", "icon": "🛡",
+        "description": "Выдать пользователю роль (moderator, banned…) по ID или @username. «user» — снять роль.",
+        "inputs": ["flow"], "output": ["flow"],
+        "branches": [{"id": "ok", "label": "готово"}, {"id": "not_found", "label": "не найден"}],
+        "defaults": {"target": "{args}", "role": "moderator", "var": "target_user"},
+        "fields": [F(key="target", label="Кому (ID или @username)", kind="template", optional=True,
+                     hint="Пусто — текущему пользователю. {args} — то, что написано после команды: /mod @ivan"),
+                   F(key="role", label="Роль", kind="role"),
+                   F(key="var", label="Пользователь — в переменную", kind="text", optional=True,
+                     hint="{id, name, username, role} — например, чтобы сообщить ему")],
+    },
+    "bot_invoice": {
+        "title": "Счёт на оплату", "group": "Оплата", "color": "#16a34a", "icon": "💳",
+        "description": "Выставить счёт и дождаться оплаты: выходы «оплачено» и «не оплачено».",
+        "inputs": ["flow"], "output": ["flow"],
+        "branches": [{"id": "paid", "label": "оплачено"}, {"id": "timeout", "label": "не оплачено"}],
+        "defaults": {"title": "Подписка", "description": "Доступ к материалам на месяц", "amount": "50",
+                     "currency": "XTR", "timeout": "900", "var": "payment"},
+        "fields": [F(key="title", label="Название (до 32 символов)", kind="template"),
+                   F(key="description", label="Описание", kind="template", multiline=True),
+                   F(key="currency", label="Валюта", kind="select", options=CURRENCIES,
+                     hint="Stars работают без договора с банком; рубли и др. — через провайдера (настройки → Бот)"),
+                   F(key="amount", label="Сумма", kind="num", hint="В звёздах или в рублях/долларах (10.50)"),
+                   F(key="timeout", label="Ждать оплату, с", kind="num"),
+                   F(key="var", label="Платёж — в переменную", kind="text", optional=True,
+                     hint="{amount, currency, charge_id}")],
     },
     "condition": {
         "title": "Условие", "group": "Логика", "color": "#ec4899", "icon": "◇",
@@ -218,6 +261,7 @@ class Route:
     ignore_case: bool = True
     description: str = ""
     steps: list[dict] = field(default_factory=list)
+    roles: list[str] = field(default_factory=list)
 
     def matches(self, text: str) -> bool:
         t, v = (text.lower(), self.value.lower()) if self.ignore_case else (text, self.value)
@@ -243,6 +287,10 @@ class CompiledBot:
     firewall: FirewallSettings
     code: dict[str, dict] = field(default_factory=dict)
     http: dict[str, dict] = field(default_factory=dict)
+    roles: list[str] = field(default_factory=lambda: ["moderator"])   # свои роли (кроме встроенных)
+    admins: list[str] = field(default_factory=list)                    # ID администраторов из настроек
+    deny_text: str = "Нет доступа"
+    payments_env: str = ""
 
     @property
     def env_values(self) -> dict[str, str]:
@@ -251,6 +299,13 @@ class CompiledBot:
     @property
     def token(self) -> str:
         return self.env_values.get(self.token_env, "") if self.token_env else ""
+
+    @property
+    def provider_token(self) -> str:
+        return self.env_values.get(self.payments_env, "") if self.payments_env else ""
+
+    def all_roles(self) -> list[str]:
+        return ["admin", *self.roles, "user", "banned"]
 
     def route(self, text: str) -> tuple[Route | None, str]:
         """Ветка для текста: команда, затем «равен», «содержит»/регулярка, «любое». -> (ветка, args)."""
@@ -267,15 +322,16 @@ class CompiledBot:
         return None, ""
 
     def summary(self) -> list[dict]:
-        out = [{"node": r.node, "kind": "command", "value": c, "description": r.description}
+        out = [{"node": r.node, "kind": "command", "value": c, "description": r.description, "roles": r.roles}
                for c, r in self.commands.items()]
-        return out + [{"node": r.node, "kind": r.kind, "value": r.value} for r in self.messages]
+        return out + [{"node": r.node, "kind": r.kind, "value": r.value, "roles": r.roles} for r in self.messages]
 
 
 class _BotWalker(_Walker):
-    def __init__(self, nodes, outgoing, reached, err, warn):
+    def __init__(self, nodes, outgoing, reached, err, warn, roles=(), payments=False):
         super().__init__(nodes, outgoing, reached, err, warn, TelegramSettings())
         self.blocks = BOT_BLOCKS
+        self.roles, self.payments = list(roles), payments
 
     def walk(self, cur, path, loop=None):
         steps: list[dict] = []
@@ -352,6 +408,25 @@ class _BotWalker(_Walker):
                 step["links"] = links
         if ntype == "bot_ask" and step is not None and not step.get("var"):
             fail("укажите переменную для ответа")
+        if ntype == "bot_send" and step is not None:
+            step.setdefault("to", data.get("to") or ("chat" if data.get("chat") else "current"))
+            if step["to"] == "chat" and not str(data.get("chat") or "").strip():
+                fail("укажите ID чата")
+            if step["to"] == "role":
+                role = str(data.get("role") or "")
+                if role not in ["all", "admin", *self.roles, "user"]:
+                    fail(f"неизвестная роль «{role}» — добавьте её в «Настройки → Бот»")
+                step["role"] = role
+            if step.get("count_var") and (msg := _check_ident(step["count_var"], "переменная")):
+                fail(msg)
+        if ntype == "bot_role" and step is not None:
+            role = str(data.get("role") or "")
+            if role not in [*self.roles, "user", "banned"]:
+                fail("роль: одна из ролей проекта, user (снять) или banned. Администраторы задаются в настройках")
+            step["role"] = role
+        if ntype == "bot_invoice" and step is not None:
+            if step.get("currency") != "XTR" and not self.payments:
+                fail("оплата в валюте требует токен платёжного провайдера (настройки → Бот); Stars работают без него")
         if ntype == "run_scenario" and step is not None:
             pid = str(data.get("project") or "")
             if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", pid):
@@ -377,6 +452,25 @@ def compile_bot(graph: dict) -> CompiledBot:
     token_env = str(settings.get("token_env") or "").strip()
     if token_env and token_env not in {e.key for e in env}:
         err(None, f"бот: в переменных проекта нет {token_env} — добавьте её (секрет) с токеном")
+    roles = []
+    for r in settings.get("roles", ["moderator"]) or []:
+        r = str(r).strip().lower()
+        if not ROLE_RE.match(r):
+            err(None, f"роль «{r}»: латиница в нижнем регистре, цифры и _")
+        elif r in BUILTIN_ROLES:
+            err(None, f"роль «{r}» встроенная — её не нужно добавлять")
+        elif r not in roles:
+            roles.append(r)
+    admins = []
+    for a in settings.get("admins") or []:
+        a = str(a).strip()
+        if not re.fullmatch(r"\d{1,20}", a):
+            err(None, f"ID администратора «{a}» — это число (узнать свой ID: напишите боту, он появится в «Пользователях»)")
+        elif a not in admins:
+            admins.append(a)
+    payments_env = str(settings.get("payments_env") or "").strip()
+    if payments_env and payments_env not in {e.key for e in env}:
+        err(None, f"оплата: в переменных проекта нет {payments_env}")
     sandbox_settings, sandbox_errors = sandbox.SandboxSettings.parse(graph.get("sandbox"))
     libraries = graph.get("libraries") or {}
     packages, package_errors = validate_packages(libraries.get("packages"))
@@ -419,6 +513,12 @@ def compile_bot(graph: dict) -> CompiledBot:
             continue
         reached.add(nid)
         route = None
+        route_roles = []
+        for r in data.get("roles") or []:
+            if r not in ["admin", *roles]:
+                err(nid, f"неизвестная роль «{r}» — добавьте её в «Настройки → Бот»")
+            else:
+                route_roles.append(r)
         if ntype == "bot_command":
             cmd = str(data.get("command") or "").strip().lstrip("/").lower()
             if not COMMAND_RE.match(cmd):
@@ -444,7 +544,9 @@ def compile_bot(graph: dict) -> CompiledBot:
                         continue
                 route = Route(nid, match, pattern, bool(data.get("ignore_case", True)))
                 messages.append(route)
-        walker = _BotWalker(nodes, outgoing, reached, err, warn)
+        if route is not None:
+            route.roles = route_roles
+        walker = _BotWalker(nodes, outgoing, reached, err, warn, roles, bool(payments_env))
         steps = walker.walk(outgoing.get((nid, None)), frozenset({nid}))
         if route is not None and steps is not None and walker.ok:
             route.steps = steps
@@ -472,8 +574,12 @@ def compile_bot(graph: dict) -> CompiledBot:
                                     "открывает бота", "warning"))
     if not token_env:
         warnings.append(Issue(None, "токен бота не задан (настройки → Бот) — работает только тест-чат", "warning"))
+    if any(r.roles for r in [*commands.values(), *messages]) and not admins:
+        warnings.append(Issue(None, "есть ветки только для ролей, но не задан ни один администратор "
+                                    "(настройки → Бот)", "warning"))
     return CompiledBot(str(graph.get("name") or ""), commands, messages, env, warnings, token_env,
-                       sandbox_settings, packages, firewall, code, http)
+                       sandbox_settings, packages, firewall, code, http, roles, admins,
+                       str(settings.get("deny_text") or "Нет доступа")[:500], payments_env)
 
 
 # ---------- данные пользователей ----------
@@ -484,12 +590,13 @@ class BotStore:
     def __init__(self, path: Path | None):
         self.path = path
         self.lock = threading.Lock()
-        self.data = {"users": {}}
+        self.data = {"users": {}, "payments": []}
         if path and path.exists():
             try:
                 self.data = json.loads(path.read_text("utf-8"))
             except (OSError, ValueError):
                 pass
+        self.data.setdefault("payments", [])
 
     def _save(self):
         if self.path is None:
@@ -519,9 +626,62 @@ class BotStore:
             return sorted(({"id": k, **v} for k, v in self.data["users"].items()),
                           key=lambda u: -u.get("last_seen", 0))
 
+    def role(self, user_id, admins: list[str]) -> str:
+        if str(user_id) in admins:
+            return "admin"
+        with self.lock:
+            return (self.data["users"].get(str(user_id)) or {}).get("role") or "user"
+
+    def find(self, target: str) -> tuple[str, dict] | None:
+        """ID или @username → (id, запись)."""
+        target = str(target or "").strip()
+        with self.lock:
+            if target.lstrip("-").isdigit():
+                u = self.data["users"].get(target)
+                return (target, dict(u)) if u is not None else None
+            name = target.lstrip("@").lower()
+            for uid, u in self.data["users"].items():
+                if name and (u.get("username") or "").lower() == name:
+                    return uid, dict(u)
+        return None
+
+    def set_role(self, user_id, role: str):
+        with self.lock:
+            u = self.data["users"].setdefault(str(user_id), {"first_seen": time.time(), "saved": {}})
+            if role == "user":
+                u.pop("role", None)
+            else:
+                u["role"] = role
+            self._save()
+            return {"id": str(user_id), **u}
+
+    def by_role(self, role: str, admins: list[str]) -> list[str]:
+        """ID пользователей с ролью; all — все, кроме заблокированных."""
+        with self.lock:
+            items = list(self.data["users"].items())
+        out = []
+        for uid, u in items:
+            r = "admin" if uid in admins else u.get("role") or "user"
+            if r == "banned":
+                continue
+            if role == "all" or r == role:
+                out.append(uid)
+        if role in ("admin", "all"):
+            out += [a for a in admins if a not in out]
+        return out
+
+    def add_payment(self, record: dict):
+        with self.lock:
+            self.data["payments"].append(record)
+            self._save()
+
+    def payments(self) -> list[dict]:
+        with self.lock:
+            return list(reversed(self.data["payments"]))
+
     def clear(self):
         with self.lock:
-            self.data = {"users": {}}
+            self.data = {"users": {}, "payments": []}
             self._save()
 
 
@@ -561,6 +721,17 @@ class EmulatorTransport:
     async def answer_callback(self, cq_id, text=""):
         pass
 
+    async def invoice(self, chat, title, description, payload, currency, amount, provider_token):
+        return self._add({"from": "bot", "chat": str(chat), "invoice": {
+            "title": title, "description": description, "payload": payload, "currency": currency, "amount": amount},
+            "text": f"💳 {title}: {_fmt_amount(amount, currency)}\n{description}"})
+
+    async def answer_pre_checkout(self, qid, ok, error=None):
+        pass
+
+    async def set_commands(self, commands, chat_id=None):
+        pass
+
 
 class TelegramTransport:
     def __init__(self, token: str):
@@ -575,11 +746,11 @@ class TelegramTransport:
         rows += [[{"text": b["text"], "url": b["url"]}] for b in links or []]
         m = await self._call("sendMessage", chat_id=chat, text=text[:4096] or "…",
                              reply_markup={"inline_keyboard": rows} if rows else None)
-        return m.get("message_id")
+        return m.get("message_id") if isinstance(m, dict) else None
 
     async def photo(self, chat, url, caption):
         m = await self._call("sendPhoto", chat_id=chat, photo=url, caption=(caption or "")[:1024] or None)
-        return m.get("message_id")
+        return m.get("message_id") if isinstance(m, dict) else None
 
     async def finish_menu(self, chat, message_id, note, remove):
         from .telegram import TelegramError
@@ -596,6 +767,38 @@ class TelegramTransport:
             await self._call("answerCallbackQuery", callback_query_id=cq_id, text=text or None)
         except TelegramError:
             pass
+
+    async def invoice(self, chat, title, description, payload, currency, amount, provider_token):
+        m = await self._call("sendInvoice", chat_id=chat, title=title[:32] or "Оплата",
+                             description=description[:255] or title[:255] or "Оплата", payload=payload,
+                             provider_token=provider_token if currency != "XTR" else "", currency=currency,
+                             prices=[{"label": title[:32] or "Оплата", "amount": amount}])
+        return m.get("message_id") if isinstance(m, dict) else None
+
+    async def answer_pre_checkout(self, qid, ok, error=None):
+        from .telegram import TelegramError
+        try:
+            await self._call("answerPreCheckoutQuery", pre_checkout_query_id=qid, ok=ok,
+                             error_message=None if ok else (error or "Счёт устарел"))
+        except TelegramError:
+            pass
+
+    async def set_commands(self, commands, chat_id=None):
+        from .telegram import TelegramError
+        try:
+            await self._call("setMyCommands", commands=commands[:100],
+                             scope={"type": "chat", "chat_id": chat_id} if chat_id else None)
+        except TelegramError:
+            pass
+
+
+def _fmt_amount(amount: int, currency: str) -> str:
+    return f"{amount} ⭐" if currency == "XTR" else f"{amount / 100:.2f} {currency}"
+
+
+def to_minor(value: float, currency: str) -> int:
+    """Сумма для Telegram: звёзды — целые, валюта — в копейках/центах."""
+    return int(round(value)) if currency == "XTR" else int(round(value * 100))
 
 
 # ---------- движок ----------
@@ -634,10 +837,20 @@ class BotEngine:
             self.stats[{"in": "in", "out": "out", "error": "errors"}[kind]] += 1
 
     async def handle(self, upd: dict):
-        """upd: {chat, user:{id,name,username}, text} или {chat, user, callback:{id, data, message_id}}."""
+        """upd: {chat, user:{id,name,username}} + text | callback{id,data,message_id} | pre_checkout | payment."""
         chat, user = str(upd["chat"]), upd["user"]
         key = f"{chat}:{user['id']}"
+        if upd.get("pre_checkout"):
+            await self._pre_checkout(upd["pre_checkout"])
+            return
         saved = self.store.touch(user, chat)
+        role = self.store.role(user["id"], self.compiled.admins)
+        if upd.get("payment"):
+            self._paid(chat, user, upd["payment"])
+            return
+        if role == "banned":
+            self.event("in", chat, "[заблокирован] " + str(upd.get("text") or ""), user=user.get("name"))
+            return
         cb = upd.get("callback")
         if cb:
             self.event("in", chat, f"[кнопка {cb.get('data')}]", user=user.get("name"))
@@ -666,8 +879,12 @@ class BotEngine:
                     return
         if route is None:
             return
+        if route.roles and role != "admin" and role not in route.roles:
+            await self._send(chat, self.compiled.deny_text, route.node)
+            return
         ctx = {"text": text, "args": args, "chat_id": chat, "user_id": str(user["id"]),
-               "user_name": user.get("name") or "", "username": user.get("username") or "", "saved": saved}
+               "user_name": user.get("name") or "", "username": user.get("username") or "", "saved": saved,
+               "role": role, "is_admin": role == "admin"}
         task = asyncio.ensure_future(self._run(route, ctx, key))
         self.tasks.add(task)
         task.add_done_callback(self.tasks.discard)
@@ -688,6 +905,29 @@ class BotEngine:
     def stop(self):
         for t in list(self.tasks):
             t.cancel()
+
+    # --- оплата ---
+
+    async def _pre_checkout(self, q: dict):
+        """Telegram спрашивает «можно оплатить?» — ответить нужно за 10 секунд."""
+        w = self.waiters.get(f"pay:{q.get('payload')}")
+        ok = bool(w and not w.future.done() and w.buttons and w.buttons[0].get("amount") == q.get("total_amount")
+                  and w.buttons[0].get("currency") == q.get("currency"))
+        await self.transport.answer_pre_checkout(q.get("id"), ok, None if ok else "Счёт устарел — запросите новый")
+
+    def _paid(self, chat, user, p: dict):
+        record = {"t": time.time(), "user_id": str(user["id"]), "user_name": user.get("name"), "chat": chat,
+                  "amount": p.get("total_amount"), "currency": p.get("currency"), "payload": p.get("payload"),
+                  "charge_id": p.get("charge_id")}
+        self.store.add_payment(record)
+        self.event("in", chat, f"[оплата {_fmt_amount(p.get('total_amount') or 0, p.get('currency') or '')}]",
+                   user=user.get("name"))
+        w = self.waiters.get(f"pay:{p.get('payload')}")
+        if w and not w.future.done():
+            w.future.set_result(record)
+        else:
+            self.event("error", chat, "оплата пришла, но диалог уже не ждёт её (таймаут или перезапуск) — "
+                                      "проверьте вкладку «Платежи»")
 
     # --- шаги ---
 
@@ -741,8 +981,62 @@ class BotEngine:
             node, op = s["node"], s["op"]
             chat = ctx["chat_id"]
             if op == "bot_send":
-                target = self._text(s.get("chat") or "", ctx, node, "чат").strip() or chat
-                await self._send(target, self._text(s["text"], ctx, node, "текст"), node, links=s.get("links"))
+                text = self._text(s["text"], ctx, node, "текст")
+                to = s.get("to") or "current"
+                if to == "role":
+                    sent = await self._broadcast(s.get("role") or "all", text, node, s.get("links"))
+                    if s.get("count_var"):
+                        ctx[s["count_var"]] = sent
+                else:
+                    target = self._text(s.get("chat") or "", ctx, node, "чат").strip() if to == "chat" else chat
+                    await self._send(target or chat, text, node, links=s.get("links"))
+            elif op == "bot_role":
+                target = self._text(s.get("target") or "", ctx, node, "кому").strip() or ctx["user_id"]
+                found = self.store.find(target)
+                if found is None:
+                    await self.block(s["branches"]["not_found"], ctx, key)
+                    return
+                uid, _ = found
+                if uid in self.compiled.admins:
+                    raise FlowError(node, "роль администратора из настроек нельзя изменить блоком")
+                u = self.store.set_role(uid, s["role"])
+                self.event("out", chat, f"[роль] {u.get('name') or uid} → {s['role']}", node)
+                if s.get("var"):
+                    ctx[s["var"]] = {"id": uid, "name": u.get("name"), "username": u.get("username"),
+                                     "role": s["role"]}
+                if uid == ctx["user_id"]:
+                    ctx["role"] = s["role"]
+                manager_refresh_commands(self)
+                await self.block(s["branches"]["ok"], ctx, key)
+                return
+            elif op == "bot_invoice":
+                currency = s.get("currency") or "XTR"
+                value = self._num(s.get("amount"), ctx, node, "сумма", 0)
+                amount = to_minor(value, currency)
+                if amount <= 0:
+                    raise FlowError(node, "сумма должна быть больше нуля")
+                if currency == "XTR" and amount > 100000:
+                    raise FlowError(node, "не больше 100 000 звёзд")
+                payload = f"{node}:{uuid.uuid4().hex[:12]}"
+                title = self._text(s.get("title") or "", ctx, node, "название")[:32]
+                desc = self._text(s.get("description") or "", ctx, node, "описание")[:255]
+                from .telegram import TelegramError
+                try:
+                    await self.transport.invoice(chat, title, desc, payload, currency, amount,
+                                                 self.compiled.provider_token)
+                except TelegramError as e:
+                    raise FlowError(node, f"Telegram: {e}") from None
+                self.event("out", chat, f"[счёт] {title}: {_fmt_amount(amount, currency)}", node)
+                timeout = min(self._num(s.get("timeout"), ctx, node, "ожидание", 900), WAIT_LIMIT)
+                w = Waiter("payment", asyncio.get_running_loop().create_future(),
+                           buttons=[{"amount": amount, "currency": currency}])
+                paid = await self._wait(f"pay:{payload}", w, timeout)
+                if s.get("var"):
+                    ctx[s["var"]] = None if paid is None else {
+                        "amount": int(value) if float(value).is_integer() else value, "currency": currency,
+                        "charge_id": paid.get("charge_id")}
+                await self.block(s["branches"]["paid" if paid else "timeout"], ctx, key)
+                return
             elif op == "bot_photo":
                 from .telegram import TelegramError
                 url = self._text(s["url"], ctx, node, "адрес")
@@ -836,6 +1130,20 @@ class BotEngine:
             else:
                 raise FlowError(node, f"неизвестный шаг «{op}»")
 
+    async def _broadcast(self, role, text, node, links=None) -> int:
+        """Рассылка: не быстрее ~20 сообщений в секунду (лимит Telegram — 30)."""
+        from .telegram import TelegramError
+        sent = 0
+        for uid in self.store.by_role(role, self.compiled.admins):
+            try:
+                await self.transport.send(uid, text, links=links)
+                sent += 1
+            except TelegramError as e:
+                self.event("error", uid, f"рассылка: {e}", node)
+            await asyncio.sleep(0.05)
+        self.event("out", f"роль {role}", f"[рассылка {sent}] {text}", node)
+        return sent
+
     async def _scenario(self, s, ctx, node):
         hub = self.hub
         if hub is None:
@@ -880,6 +1188,27 @@ class LiveBot:
     offset: int = 0
 
 
+async def sync_commands(engine: "BotEngine"):
+    """Меню команд: общее — для всех, команды для ролей — только в чатах тех, у кого роль есть."""
+    compiled = engine.compiled
+    item = lambda c, r: {"command": c, "description": (r.description or c)[:250]}  # noqa: E731
+    public = [item(c, r) for c, r in compiled.commands.items() if not r.roles]
+    await engine.transport.set_commands(public)
+    if not any(r.roles for r in compiled.commands.values()):
+        return
+    privileged = {uid: engine.store.role(uid, compiled.admins) for uid in
+                  set(compiled.admins) | {u["id"] for u in engine.store.users() if u.get("role") not in (None, "banned")}}
+    for uid, role in privileged.items():
+        cmds = [item(c, r) for c, r in compiled.commands.items()
+                if not r.roles or role == "admin" or role in r.roles]
+        await engine.transport.set_commands(cmds, chat_id=uid)
+
+
+def manager_refresh_commands(engine: "BotEngine"):
+    """После смены роли — обновить меню команд (в фоне)."""
+    asyncio.ensure_future(sync_commands(engine))
+
+
 def normalize_update(upd: dict) -> dict | None:
     if "callback_query" in upd:
         cq = upd["callback_query"]
@@ -887,7 +1216,17 @@ def normalize_update(upd: dict) -> dict | None:
         u = cq.get("from") or {}
         return {"chat": (msg.get("chat") or {}).get("id"), "user": _user(u),
                 "callback": {"id": cq.get("id"), "data": cq.get("data"), "message_id": msg.get("message_id")}}
+    if "pre_checkout_query" in upd:
+        q = upd["pre_checkout_query"]
+        return {"chat": (q.get("from") or {}).get("id"), "user": _user(q.get("from") or {}),
+                "pre_checkout": {"id": q.get("id"), "currency": q.get("currency"), "total_amount": q.get("total_amount"),
+                                 "payload": q.get("invoice_payload")}}
     msg = upd.get("message")
+    if msg and msg.get("successful_payment"):
+        p = msg["successful_payment"]
+        return {"chat": (msg.get("chat") or {}).get("id"), "user": _user(msg.get("from") or {}),
+                "payment": {"currency": p.get("currency"), "total_amount": p.get("total_amount"),
+                            "payload": p.get("invoice_payload"), "charge_id": p.get("telegram_payment_charge_id")}}
     if not msg or "text" not in msg:
         return None
     return {"chat": (msg.get("chat") or {}).get("id"), "user": _user(msg.get("from") or {}), "text": msg["text"]}
@@ -950,12 +1289,7 @@ class BotManager:
         return bot
 
     async def _commands(self, bot: LiveBot):
-        from .telegram import TelegramError, call
-        cmds = [{"command": c, "description": (r.description or c)[:250]} for c, r in bot.engine.compiled.commands.items()]
-        try:
-            await call(bot.token, "setMyCommands", commands=cmds[:100])
-        except TelegramError:
-            pass
+        await sync_commands(bot.engine)
 
     async def stop(self, pid: str, persist: bool = True):
         bot = self.live.pop(pid, None)
@@ -992,7 +1326,7 @@ class BotManager:
             began = time.monotonic()
             try:
                 updates = await call(bot.token, "getUpdates", http_timeout=POLL_TIMEOUT, timeout=POLL_TIMEOUT,
-                                     offset=bot.offset or None, allowed_updates=["message", "callback_query"])
+                                     offset=bot.offset or None, allowed_updates=["message", "callback_query", "pre_checkout_query"])
                 bot.error = None if not (bot.error or "").startswith("новая версия") else bot.error
                 backoff = 1
             except asyncio.CancelledError:
@@ -1056,9 +1390,24 @@ EMU_CHAT = "1"
 EMU_USER = {"id": 1, "name": "Вы", "username": "tester"}
 
 
-async def emulate(engine: BotEngine, text: str | None = None, button: dict | None = None, wait: float = 4):
+async def emulate(engine: BotEngine, text: str | None = None, button: dict | None = None, wait: float = 4,
+                  pay: dict | None = None):
     tr: EmulatorTransport = engine.transport
-    if text is not None:
+    if pay is not None:
+        msg = next((m for m in tr.messages if m["id"] == pay.get("message_id") and m.get("invoice")), None)
+        if msg is None:
+            return
+        inv = msg["invoice"]
+        tr.user_message(f"[оплатить {_fmt_amount(inv['amount'], inv['currency'])}]")
+        w = engine.waiters.get(f"pay:{inv['payload']}")
+        if w is None or w.future.done():
+            msg["note"] = "счёт устарел"
+            return
+        msg["note"] = "оплачено (тест)"
+        await engine.handle({"chat": EMU_CHAT, "user": EMU_USER, "payment": {
+            "currency": inv["currency"], "total_amount": inv["amount"], "payload": inv["payload"],
+            "charge_id": "test-" + uuid.uuid4().hex[:8]}})
+    elif text is not None:
         tr.user_message(text)
         await engine.handle({"chat": EMU_CHAT, "user": EMU_USER, "text": text})
     elif button is not None:

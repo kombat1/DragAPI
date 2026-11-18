@@ -518,6 +518,8 @@ class FakeTelegram:
         if method == "sendMessage":
             self.sent.append(body)
             return httpx.Response(200, json={"ok": True, "result": {"message_id": len(self.sent)}})
+        if method in ("sendInvoice", "sendPhoto"):
+            return httpx.Response(200, json={"ok": True, "result": {"message_id": 10_000 + len(self.calls)}})
         return httpx.Response(200, json={"ok": True, "result": True})
 
 

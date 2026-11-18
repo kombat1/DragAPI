@@ -124,7 +124,7 @@ function visible(f, d, defaults) {
   return Object.entries(f.show_if).every(([k, vals]) => vals.includes(d[k] ?? defaults[k]))
 }
 
-export default function AutoForm({ spec, d, set, projectId, agent, variables }) {
+export default function AutoForm({ spec, d, set, projectId, agent, variables, roles = [] }) {
   const fields = spec.fields.filter((f) => visible(f, d, spec.defaults))
   const out = []
   for (let i = 0; i < fields.length; i++) {
@@ -148,15 +148,47 @@ export default function AutoForm({ spec, d, set, projectId, agent, variables }) 
       i++
       continue
     }
-    out.push(<FieldInput key={f.key} f={f} d={d} set={set} variables={variables} />)
+    out.push(<FieldInput key={f.key} f={f} d={d} set={set} variables={variables} roles={roles} />)
   }
   return <>{out}</>
 }
 
-function FieldInput({ f, d, set, variables }) {
+function FieldInput({ f, d, set, variables, roles }) {
   const value = d[f.key]
   const put = (v) => set({ [f.key]: v })
   switch (f.kind) {
+    case 'roles': {
+      const chosen = value || []
+      return (
+        <Field label={f.label} hint={f.hint}>
+          <div className="weekdays">
+            {['admin', ...roles].map((r) => (
+              <label key={r} className={`chip ${chosen.includes(r) ? 'on' : ''}`}>
+                <input type="checkbox" checked={chosen.includes(r)} onChange={(e) => put(e.target.checked ? [...chosen, r] : chosen.filter((x) => x !== r))} />
+                {r}
+              </label>
+            ))}
+          </div>
+        </Field>
+      )
+    }
+    case 'role':
+    case 'role_any': {
+      const options = f.kind === 'role' ? [...roles, 'user', 'banned'] : ['all', 'admin', ...roles, 'user']
+      const label = { all: 'все пользователи', user: 'user (обычные / снять роль)', banned: 'banned (заблокировать)' }
+      return (
+        <Field label={f.label} hint={f.hint}>
+          <select value={value ?? ''} onChange={(e) => put(e.target.value)}>
+            {!options.includes(value) && <option value={value}>{value || '—'}</option>}
+            {options.map((r) => (
+              <option key={r} value={r}>
+                {label[r] || r}
+              </option>
+            ))}
+          </select>
+        </Field>
+      )
+    }
     case 'select':
       return (
         <Field label={f.label} hint={f.hint}>
@@ -352,11 +384,15 @@ export function autoSummary(type, d) {
     case 'telegram':
       return `«${String(d.text || '').slice(0, 40)}»${d.chat ? ` → ${d.chat}` : ''}`
     case 'bot_command':
-      return `/${d.command}${d.description ? ` — ${d.description}` : ''}`
+      return `/${d.command}${(d.roles || []).length ? ` 🔒${d.roles.join(',')}` : d.description ? ` — ${d.description}` : ''}`
+    case 'bot_role':
+      return `${d.target || 'себе'} → ${d.role}`
+    case 'bot_invoice':
+      return `${d.title}: ${d.amount} ${d.currency === 'XTR' ? '⭐' : d.currency}`
     case 'bot_message':
       return d.match === 'any' ? 'любое сообщение' : `${{ equals: '=', contains: '∋', regex: '~' }[d.match] || ''} «${d.pattern}»`
     case 'bot_send':
-      return `«${String(d.text || '').slice(0, 40)}»${(d.links || []).length ? ` +${d.links.length} 🔗` : ''}${d.chat ? ` → ${d.chat}` : ''}`
+      return `${d.to === 'role' ? `📢 ${d.role}: ` : ''}«${String(d.text || '').slice(0, 40)}»${(d.links || []).length ? ` +${d.links.length} 🔗` : ''}${d.to === 'chat' && d.chat ? ` → ${d.chat}` : ''}`
     case 'bot_photo':
       return d.url
     case 'bot_ask':
