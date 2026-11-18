@@ -4,4 +4,4 @@
     python -m dragapi_agent --server http://платформа:8765 --token <токен агента>
 """
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"

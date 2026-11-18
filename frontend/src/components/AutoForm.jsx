@@ -3,7 +3,7 @@ import { api } from '../api.js'
 import ListEditor from './ListEditor.jsx'
 import { HelpButton } from './ExprHelp.jsx'
 import { AutomationProjectSelect, ButtonsInput, LinksInput } from './Bots.jsx'
-import { ColorField, ImageField, RegionField, VisionTest } from './Vision.jsx'
+import { ColorField, ImageField, RegionField, VisionTest, WindowTitleField } from './Vision.jsx'
 
 // Форма блока автоматизации строится по описанию полей из каталога (backend: app/automation.py).
 
@@ -78,7 +78,7 @@ function KeysInput({ value, onChange }) {
 }
 
 // «📍 С экрана»: через 3 секунды агент сообщает, где курсор, — координаты попадают в поля
-function PickPoint({ projectId, agent, onPick }) {
+function PickPoint({ projectId, agent, onPick, relative }) {
   const [state, setState] = useState(null) // null | {left} | {error}
   const alive = useRef(true)
   useEffect(() => () => (alive.current = false), [])
@@ -91,6 +91,11 @@ function PickPoint({ projectId, agent, onPick }) {
         const s = await api.pickPointStatus(projectId, p.id)
         if (s.error) return setState({ error: s.error })
         if (s.x !== undefined) {
+          if (relative) {
+            if (!s.window) return setState({ error: 'под курсором нет окна — наведите курсор на нужное окно' })
+            onPick(s.x - s.window.x, s.y - s.window.y)
+            return setState({ note: `внутри окна «${s.window.title}»` })
+          }
           onPick(s.x, s.y)
           return setState(null)
         }
@@ -103,10 +108,11 @@ function PickPoint({ projectId, agent, onPick }) {
   }
   return (
     <span className="pick-point">
-      <button className="small" onClick={start} disabled={state && !state.error} title="Наведите курсор на нужное место за 3 секунды">
-        {state && !state.error ? `📍 Наведите курсор… ${state.left ?? ''}` : '📍 С экрана'}
+      <button className="small" onClick={start} disabled={state && state.left !== undefined} title={`Наведите курсор на нужное место за 3 секунды${relative ? ' — координаты запишутся относительно окна под курсором' : ''}`}>
+        {state?.left !== undefined ? `📍 Наведите курсор… ${state.left ?? ''}` : '📍 С экрана'}
       </button>
       {state?.error && <span className="issue error">{state.error}</span>}
+      {state?.note && <span className="muted">{state.note}</span>}
     </span>
   )
 }
@@ -129,7 +135,7 @@ function visible(f, d, defaults) {
   return Object.entries(f.show_if).every(([k, vals]) => vals.includes(d[k] ?? defaults[k]))
 }
 
-export default function AutoForm({ spec, d, set, projectId, agent, variables, roles = [], nodeId, graph, readOnly = false }) {
+export default function AutoForm({ spec, d, set, projectId, agent, variables, roles = [], nodeId, nodeType, graph, readOnly = false }) {
   const fields = spec.fields.filter((f) => visible(f, d, spec.defaults))
   const out = []
   for (let i = 0; i < fields.length; i++) {
@@ -145,9 +151,13 @@ export default function AutoForm({ spec, d, set, projectId, agent, variables, ro
           <div className="list-row point-row">
             <input className="mono" placeholder="X" value={d[f.key] ?? ''} onChange={(e) => set({ [f.key]: e.target.value })} />
             <input className="mono" placeholder="Y" value={d[g.key] ?? ''} onChange={(e) => set({ [g.key]: e.target.value })} />
-            <PickPoint projectId={projectId} agent={agent} onPick={(x, y) => set({ [f.key]: String(x), [g.key]: String(y) })} />
+            <PickPoint projectId={projectId} agent={agent} relative={!!d.window && !d.relative} onPick={(x, y) => set({ [f.key]: String(x), [g.key]: String(y) })} />
           </div>
-          {(f.hint || g.hint) && <div className="hint">{f.hint || g.hint}</div>}
+          {d.window && !d.relative ? (
+            <div className="hint">Координаты внутри окна «{d.window}»: от левого верхнего угла его содержимого.</div>
+          ) : (
+            (f.hint || g.hint) && <div className="hint">{f.hint || g.hint}</div>
+          )}
         </div>,
       )
       i++
@@ -155,8 +165,16 @@ export default function AutoForm({ spec, d, set, projectId, agent, variables, ro
     }
     out.push(<FieldInput key={f.key} f={f} d={d} set={set} variables={variables} roles={roles} projectId={projectId} agent={agent} readOnly={readOnly} />)
   }
-  if (spec.group === 'Зрение' && graph && nodeId) {
-    out.push(<VisionTest key="__vision_test" projectId={projectId} agent={agent} nodeId={nodeId} graph={graph} />)
+  if ((spec.group === 'Зрение' || nodeType === 'window_find') && graph && nodeId) {
+    out.push(
+      d.window ? (
+        <div key="__vision_test" className="hint">
+          Блок ищет внутри окна «{d.window}» — проверить его можно запуском сценария (окно находит «Найти окно»).
+        </div>
+      ) : (
+        <VisionTest key="__vision_test" projectId={projectId} agent={agent} nodeId={nodeId} graph={graph} />
+      ),
+    )
   }
   return <>{out}</>
 }
@@ -173,8 +191,27 @@ function FieldInput({ f, d, set, variables, roles, projectId, agent, readOnly })
       )
     case 'region':
       return (
+        <Field label={f.label} hint={d.window ? `Относительно окна «${d.window}». Пусто — всё окно.` : f.hint}>
+          <RegionField value={value} onChange={put} projectId={projectId} agent={agent} optional={f.optional || !!d.window} readOnly={readOnly} relative={!!d.window} />
+        </Field>
+      )
+    case 'window': {
+      const vars = (variables || []).filter((v) => v !== value)
+      return (
         <Field label={f.label} hint={f.hint}>
-          <RegionField value={value} onChange={put} projectId={projectId} agent={agent} optional={f.optional} readOnly={readOnly} />
+          <input className="mono" list={`win-vars-${f.key}`} value={value ?? ''} placeholder={f.optional ? 'нет — координаты экрана' : 'win'} onChange={(e) => put(e.target.value.trim())} disabled={readOnly} />
+          <datalist id={`win-vars-${f.key}`}>
+            {vars.map((v) => (
+              <option key={v} value={v} />
+            ))}
+          </datalist>
+        </Field>
+      )
+    }
+    case 'window_title':
+      return (
+        <Field label={f.label} hint={f.hint} help={<HelpButton kind="template" onInsert={put} variables={variables} />}>
+          <WindowTitleField value={value} onChange={put} onPick={(w) => set({ [f.key]: w.title, ...(d.process ? { process: w.process } : {}) })} projectId={projectId} agent={agent} readOnly={readOnly} />
         </Field>
       )
     case 'color':
@@ -186,6 +223,7 @@ function FieldInput({ f, d, set, variables, roles, projectId, agent, readOnly })
             projectId={projectId}
             agent={agent}
             readOnly={readOnly}
+            relative={!!d.window}
             onPickPoint={(p) => set({ [f.key]: p.hex, ...('x' in d || 'y' in d ? { x: String(p.x), y: String(p.y) } : {}) })}
           />
         </Field>
@@ -369,6 +407,12 @@ function FieldInput({ f, d, set, variables, roles, projectId, agent, readOnly })
 
 // Короткое описание блока на канвасе
 export function autoSummary(type, d) {
+  const text = summaryText(type, d)
+  const inWindow = d.window && type.startsWith('mouse_') && !(type === 'mouse_move' && d.relative)
+  return inWindow || (d.window && ['autoclick', 'image_find', 'pixel_check'].includes(type)) ? `${text} · в окне ${d.window}` : text
+}
+
+function summaryText(type, d) {
   switch (type) {
     case 'trigger':
       return (
@@ -423,7 +467,11 @@ export function autoSummary(type, d) {
     case 'pixel_check':
       return `(${d.x}, ${d.y}) = ${d.color}${Number(d.wait) ? ` · ждать до ${d.wait} с` : ''}`
     case 'ocr':
-      return `${d.region ? `${d.region.w}×${d.region.h} в (${d.region.x}, ${d.region.y})` : '⚠ нет области'} → ${d.target}${d.digits ? ' (цифры)' : ''}`
+      return `${d.region ? `${d.region.w}×${d.region.h} в (${d.region.x}, ${d.region.y})` : d.window ? 'всё окно' : '⚠ нет области'}${d.window ? ` · в окне ${d.window}` : ''} → ${d.target}${d.digits ? ' (цифры)' : ''}`
+    case 'window_find':
+      return `${d.mode === 'disappear' ? 'ждать закрытия' : 'найти'} «${d.title || '*'}»${d.process ? ` (${d.process})` : ''}${Number(d.wait) ? ` · до ${d.wait} с` : ''} → ${d.target}`
+    case 'window_action':
+      return `${d.window}: ${{ activate: 'активировать', minimize: 'свернуть', maximize: 'развернуть', restore: 'восстановить', close: 'закрыть', move: `в (${d.x || '·'}, ${d.y || '·'})${d.w || d.h ? ` ${d.w || '·'}×${d.h || '·'}` : ''}` }[d.action]}`
     case 'telegram':
       return `«${String(d.text || '').slice(0, 40)}»${d.chat ? ` → ${d.chat}` : ''}`
     case 'bot_command':

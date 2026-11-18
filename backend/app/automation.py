@@ -38,6 +38,11 @@ MAX_STEPS = 5000
 F = dict
 
 
+def _win(hint="Имя переменной из блока «Найти окно» (например, win): координаты отсчитываются от левого верхнего "
+                   "угла окна — сценарий не сломается, если окно сдвинут"):
+    return F(key="window", label="Внутри окна", kind="window", optional=True, hint=hint)
+
+
 def _xy(prefix="", hint="Пусто — текущая позиция курсора"):
     return [F(key=f"x{prefix}", label=f"X{prefix}", kind="num", optional=True, group="point", hint=hint),
             F(key=f"y{prefix}", label=f"Y{prefix}", kind="num", optional=True, group="point")]
@@ -75,7 +80,8 @@ AUTO_BLOCKS: dict[str, dict] = {
         "inputs": ["flow"], "output": ["flow"],
         "defaults": {"x": "500", "y": "300", "relative": False, "duration": "0.2"},
         "fields": [*_xy(hint=""), F(key="relative", label="Относительно текущей позиции", kind="bool"),
-                   F(key="duration", label="Длительность, с", kind="num", optional=True)],
+                   F(key="duration", label="Длительность, с", kind="num", optional=True),
+                   {**_win(), "show_if": {"relative": [False]}}],
         "required": ["x", "y"],
     },
     "mouse_click": {
@@ -86,7 +92,7 @@ AUTO_BLOCKS: dict[str, dict] = {
         "fields": [*_xy(), F(key="button", label="Кнопка", kind="select",
                               options=[["left", "Левая"], ["right", "Правая"], ["middle", "Средняя"]]),
                    F(key="clicks", label="Щелчков (1–3)", kind="num", optional=True),
-                   F(key="duration", label="Перемещение к точке, с", kind="num", optional=True)],
+                   F(key="duration", label="Перемещение к точке, с", kind="num", optional=True), _win()],
     },
     "mouse_down": {
         "title": "Зажать кнопку", "group": "Мышь", "color": "#0ea5e9", "icon": "⤓",
@@ -95,7 +101,7 @@ AUTO_BLOCKS: dict[str, dict] = {
         "defaults": {"x": "", "y": "", "button": "left", "duration": "0"},
         "fields": [*_xy(), F(key="button", label="Кнопка", kind="select",
                               options=[["left", "Левая"], ["right", "Правая"], ["middle", "Средняя"]]),
-                   F(key="duration", label="Перемещение к точке, с", kind="num", optional=True)],
+                   F(key="duration", label="Перемещение к точке, с", kind="num", optional=True), _win()],
     },
     "mouse_up": {
         "title": "Отпустить кнопку", "group": "Мышь", "color": "#0ea5e9", "icon": "⤒",
@@ -104,7 +110,7 @@ AUTO_BLOCKS: dict[str, dict] = {
         "defaults": {"x": "", "y": "", "button": "left", "duration": "0"},
         "fields": [*_xy(), F(key="button", label="Кнопка", kind="select",
                               options=[["left", "Левая"], ["right", "Правая"], ["middle", "Средняя"]]),
-                   F(key="duration", label="Перемещение к точке, с", kind="num", optional=True)],
+                   F(key="duration", label="Перемещение к точке, с", kind="num", optional=True), _win()],
     },
     "mouse_drag": {
         "title": "Перетащить", "group": "Мышь", "color": "#0ea5e9", "icon": "✋",
@@ -118,7 +124,7 @@ AUTO_BLOCKS: dict[str, dict] = {
                    F(key="y2", label="Куда Y", kind="num", group="point"),
                    F(key="button", label="Кнопка", kind="select",
                      options=[["left", "Левая"], ["right", "Правая"], ["middle", "Средняя"]]),
-                   F(key="duration", label="Длительность, с", kind="num", optional=True)],
+                   F(key="duration", label="Длительность, с", kind="num", optional=True), _win()],
     },
     "mouse_scroll": {
         "title": "Прокрутка", "group": "Мышь", "color": "#0ea5e9", "icon": "↕",
@@ -126,7 +132,7 @@ AUTO_BLOCKS: dict[str, dict] = {
         "inputs": ["flow"], "output": ["flow"],
         "defaults": {"dy": "-3", "dx": "0", "x": "", "y": ""},
         "fields": [F(key="dy", label="По вертикали (щелчков)", kind="num", optional=True),
-                   F(key="dx", label="По горизонтали (щелчков)", kind="num", optional=True), *_xy()],
+                   F(key="dx", label="По горизонтали (щелчков)", kind="num", optional=True), *_xy(), _win()],
     },
     "autoclick": {
         "title": "Автокликер", "group": "Мышь", "color": "#0284c7", "icon": "⚡",
@@ -141,7 +147,7 @@ AUTO_BLOCKS: dict[str, dict] = {
                      options=[["count", "N щелчков"], ["seconds", "В течение N секунд"]]),
                    F(key="count", label="Щелчков", kind="num", show_if={"mode": ["count"]}),
                    F(key="seconds", label="Секунд", kind="num", show_if={"mode": ["seconds"]}),
-                   F(key="target", label="Записать число щелчков в переменную", kind="text", optional=True)],
+                   F(key="target", label="Записать число щелчков в переменную", kind="text", optional=True), _win()],
     },
     "key_type": {
         "title": "Ввести текст", "group": "Клавиатура", "color": "#f59e0b", "icon": "⌨",
@@ -258,8 +264,9 @@ AUTO_BLOCKS: dict[str, dict] = {
                      options=[["appear", "появится"], ["disappear", "исчезнет"]]),
                    F(key="wait", label="Ждать до, с", kind="num", optional=True,
                      hint="0 — проверить один раз; проверка ~4 раза в секунду"),
+                   _win("Переменная из «Найти окно»: искать только в этом окне, область — относительно него"),
                    F(key="region", label="Где искать", kind="region", optional=True,
-                     hint="Пусто — весь экран. Область меньше — поиск быстрее и без ложных совпадений"),
+                     hint="Пусто — весь экран (или всё окно). Область меньше — поиск быстрее и без ложных совпадений"),
                    F(key="confidence", label="Точность совпадения (0.5–1)", kind="num", optional=True,
                      hint="0.85 — обычно; ниже — находит похожее, выше — только точную копию"),
                    F(key="grayscale", label="Без учёта цвета", kind="bool"),
@@ -283,6 +290,7 @@ AUTO_BLOCKS: dict[str, dict] = {
         "defaults": {"x": "500", "y": "300", "color": "#00ff00", "tolerance": "10", "wait": "0", "target": "pixel"},
         "fields": [F(key="x", label="X", kind="num", group="point", hint=""),
                    F(key="y", label="Y", kind="num", group="point"),
+                   _win(),
                    F(key="color", label="Ожидаемый цвет (#RRGGBB)", kind="color"),
                    F(key="tolerance", label="Допуск (0–255)", kind="num", optional=True,
                      hint="Насколько может отличаться каждый канал: 0 — точно этот цвет"),
@@ -297,14 +305,56 @@ AUTO_BLOCKS: dict[str, dict] = {
         "description": "Распознать текст в области экрана (OCR) и положить в переменную — дальше «Условие»: "
                        "contains(text, 'Готово'), int(text) > 100.",
         "inputs": ["flow"], "output": ["flow"],
-        "defaults": {"region": None, "lang": "rus+eng", "digits": False, "target": "text"},
-        "fields": [F(key="region", label="Область", kind="region",
+        "defaults": {"region": None, "lang": "rus+eng", "digits": False, "target": "text", "window": ""},
+        "fields": [_win("Переменная из «Найти окно»: область — относительно окна; без области — всё окно"),
+                   F(key="region", label="Область", kind="region", optional=True,
                      hint="Выделите на снимке экрана только нужный текст — так точнее и быстрее"),
                    F(key="lang", label="Язык", kind="select",
                      options=[["rus+eng", "Русский и английский"], ["rus", "Русский"], ["eng", "Английский"]]),
                    F(key="digits", label="Только цифры (счётчики, цены)", kind="bool"),
                    F(key="target", label="Текст — в переменную", kind="text")],
-        "required": ["region"],
+    },
+    "window_find": {
+        "title": "Найти окно", "group": "Окна", "color": "#ea580c", "icon": "🪟",
+        "description": "Найти окно по заголовку или программе: ждать, пока откроется (или закроется), и сделать "
+                       "активным. Окно — в переменную: дальше клики «внутри окна» и «Окно: действие».",
+        "inputs": ["flow"], "output": ["flow"],
+        "branches": [{"id": "true", "label": "да"}, {"id": "false", "label": "нет"}],
+        "defaults": {"title": "Блокнот", "match": "contains", "process": "", "mode": "appear", "wait": "5",
+                     "activate": True, "target": "win"},
+        "fields": [F(key="title", label="Заголовок окна", kind="window_title",
+                     hint="Можно часть заголовка; {выражения} подставляются (в регулярном выражении фигурные "
+                          "скобки — {{ и }}). Пусто — любое окно программы"),
+                   F(key="match", label="Как сравнивать", kind="select",
+                     options=[["contains", "Содержит (без учёта регистра)"], ["exact", "Точно совпадает"],
+                              ["regex", "Регулярное выражение"]]),
+                   F(key="process", label="Программа (имя процесса)", kind="text", optional=True,
+                     hint="Например firefox, chrome.exe, code — если у разных программ похожие заголовки"),
+                   F(key="mode", label="Ждать, пока окно", kind="select",
+                     options=[["appear", "откроется (есть)"], ["disappear", "закроется (нет)"]]),
+                   F(key="wait", label="Ждать до, с", kind="num", optional=True, hint="0 — проверить один раз"),
+                   F(key="activate", label="Сделать активным (на передний план)", kind="bool",
+                     show_if={"mode": ["appear"]}),
+                   F(key="target", label="Окно — в переменную", kind="text",
+                     hint="win['title'], win['x'], win['y'], win['w'], win['h'], win['state'], win['process']")],
+    },
+    "window_action": {
+        "title": "Окно: действие", "group": "Окна", "color": "#ea580c", "icon": "🗗",
+        "description": "Активировать, свернуть, развернуть, восстановить, переместить / изменить размер или закрыть "
+                       "окно из «Найти окно».",
+        "inputs": ["flow"], "output": ["flow"],
+        "defaults": {"window": "win", "action": "activate", "x": "100", "y": "100", "w": "", "h": ""},
+        "fields": [F(key="window", label="Окно (переменная)", kind="window",
+                     hint="Переменная из блока «Найти окно»"),
+                   F(key="action", label="Действие", kind="select",
+                     options=[["activate", "Активировать"], ["minimize", "Свернуть"], ["maximize", "Развернуть"],
+                              ["restore", "Восстановить"], ["move", "Переместить / размер"], ["close", "Закрыть"]]),
+                   F(key="x", label="X", kind="num", optional=True, show_if={"action": ["move"]},
+                     hint="Левый верхний угол содержимого окна; пусто — не менять"),
+                   F(key="y", label="Y", kind="num", optional=True, show_if={"action": ["move"]}),
+                   F(key="w", label="Ширина", kind="num", optional=True, show_if={"action": ["move"]},
+                     hint="Пусто — не менять размер"),
+                   F(key="h", label="Высота", kind="num", optional=True, show_if={"action": ["move"]})],
     },
     "code": {
         "title": "Python-код", "group": "Данные", "color": "#0f766e", "icon": "🐍",
@@ -687,7 +737,7 @@ class _Walker:
             if ntype == "trigger":
                 self.fail(cur, "«Старт» может быть только началом сценария")
                 return None
-            if ntype in ("condition", "tg_ask", "image_find", "pixel_check"):
+            if ntype in ("condition", "tg_ask", "image_find", "pixel_check", "window_find"):
                 step = self._step(cur, ntype, data)
                 then = self.walk(self.outgoing.get((cur, "true")), frozenset(path), loop)
                 other = self.walk(self.outgoing.get((cur, "false")), frozenset(path), loop)
@@ -780,6 +830,15 @@ class _Walker:
                 if not items and ok:
                     fail("нет ни одного присваивания")
                 step[key] = items
+            elif kind in ("window", "window_title"):
+                text = str(value or "").strip()
+                if kind == "window" and text and (msg := _check_ident(text, label)):
+                    fail(msg)
+                elif kind == "window" and required and not text:
+                    fail(f"«{label}»: укажите переменную из «Найти окно»")
+                elif kind == "window_title" and (msg := _check_template(text, label)):
+                    fail(msg)
+                step[key] = text
             elif kind == "image":
                 text = str(value or "").strip()
                 if not text:
@@ -814,6 +873,15 @@ class _Walker:
                     items.append({"key": k, "expr": str(a["expr"]).strip()})
                 step[key] = items
 
+        if ntype == "ocr" and not step.get("region") and not step.get("window"):
+            fail("«Область»: выделите область на снимке экрана (или укажите окно)")
+        if ntype == "window_find" and not step.get("title") and not str(data.get("process") or "").strip():
+            fail("укажите заголовок окна или программу")
+        if ntype == "window_find" and step.get("match") == "regex" and "{" not in str(step.get("title")):
+            try:
+                re.compile(step.get("title") or "")
+            except re.error as e:
+                fail(f"регулярное выражение заголовка: {e}")
         if ntype in ("mouse_click", "mouse_down", "mouse_up", "mouse_scroll", "autoclick", "mouse_drag"):
             pairs = [("x1", "y1")] if ntype == "mouse_drag" else [("x", "y")]
             for xk, yk in pairs:

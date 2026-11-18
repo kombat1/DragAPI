@@ -403,7 +403,7 @@ export default function Inspector({ node, onChange, onDelete, issues, availableF
             ))}
           </div>
         )}
-        <AutoForm spec={spec} d={d} set={set} projectId={projectId} agent={agent} variables={availableFields} roles={botRoles} nodeId={node.id} graph={graph} readOnly={readOnly} />
+        <AutoForm spec={spec} d={d} set={set} projectId={projectId} agent={agent} variables={availableFields} roles={botRoles} nodeId={node.id} nodeType={node.type} graph={graph} readOnly={readOnly} />
         {availableFields.length > 0 && node.type !== 'trigger' && (
           <div className="available">
             <div className="field-label">Переменные на входе блока</div>

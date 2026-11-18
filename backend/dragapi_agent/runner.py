@@ -151,11 +151,39 @@ class Runner:
         return value
 
     def point(self, step, xk="x", yk="y"):
-        """Координаты шага или None, если обе пустые (действие в текущей позиции)."""
+        """Координаты шага или None, если обе пустые (действие в текущей позиции).
+        С «Внутри окна» — относительно левого верхнего угла окна, где бы оно сейчас ни было."""
         x, y = step.get(xk), step.get(yk)
         if (x is None or str(x).strip() == "") and (y is None or str(y).strip() == ""):
             return None
-        return (self.num(x, f"координата {xk}", integer=True), self.num(y, f"координата {yk}", integer=True))
+        p = (self.num(x, f"координата {xk}", integer=True), self.num(y, f"координата {yk}", integer=True))
+        win = self.window_of(step)
+        return (p[0] + win["x"], p[1] + win["y"]) if win else p
+
+    def window_of(self, step) -> dict | None:
+        """Окно из переменной («Найти окно») — с текущими координатами: его могли сдвинуть."""
+        name = step.get("window")
+        if not name:
+            return None
+        saved = self.vars.get(name)
+        if not isinstance(saved, dict) or "id" not in saved:
+            raise StepError(self.node, f"в переменной «{name}» нет окна — сначала блок «Найти окно» с этой переменной")
+        info = self._window_call(lambda: self.d.get_window(saved["id"]))
+        if info is None:
+            raise StepError(self.node, f"окно «{saved.get('title', '')}» закрыто")
+        if info.get("state") == "minimized":
+            raise StepError(self.node, f"окно «{info.get('title', '')}» свёрнуто — разверните его блоком «Окно: действие»")
+        self.vars[name] = {**saved, **info}
+        return info
+
+    def _window_call(self, fn):
+        from .windows import WindowError
+        if not hasattr(self.d, "list_windows"):
+            raise StepError(self.node, "этот агент не умеет работать с окнами — обновите агента")
+        try:
+            return fn()
+        except WindowError as e:
+            raise StepError(self.node, str(e)) from None
 
     def glide(self, target, duration: float):
         """Плавное перемещение курсора (с замедлением в начале и конце)."""
@@ -226,7 +254,7 @@ class Runner:
     # мышь
 
     def op_mouse_move(self, s):
-        target = self.point(s)
+        target = self.point({**s, "window": "" if s.get("relative") else s.get("window")})
         if target is None:
             raise StepError(self.node, "не заданы координаты")
         if s.get("relative"):
@@ -414,8 +442,14 @@ class Runner:
         return vision
 
     def _region(self, s):
+        """Область поиска в координатах экрана; «Внутри окна» — относительно окна (пусто — всё окно)."""
         r = s.get("region")
-        return (r["x"], r["y"], r["w"], r["h"]) if r else None
+        win = self.window_of(s)
+        if win is None:
+            return (r["x"], r["y"], r["w"], r["h"]) if r else None
+        if not r:
+            return (win["x"], win["y"], win["w"], win["h"])
+        return (win["x"] + r["x"], win["y"] + r["y"], r["w"], r["h"])
 
     def _poll(self, s, look):
         """look() до успеха или пока не истечёт «Ждать до, с» (0 — проверить один раз)."""
@@ -485,8 +519,7 @@ class Runner:
 
     def op_pixel_check(self, s):
         v = self._vision()
-        x = self.num(s.get("x"), "X", integer=True)
-        y = self.num(s.get("y"), "Y", integer=True)
+        x, y = self.point(s)
         try:
             want = v.parse_color(self.text(s.get("color"), "цвет"))
         except v.VisionError as e:
@@ -520,6 +553,74 @@ class Runner:
             text = text.replace(" ", "")
         self.vars[s.get("target") or "text"] = text
         self.emit({"type": "log", "node": self.node, "message": f"текст: {text[:300]!r}"})
+
+    # окна
+
+    def op_window_find(self, s):
+        from .windows import matches
+        title = self.text(s.get("title"), "заголовок")
+        how, process = s.get("match") or "contains", self.text(s.get("process") or "", "программа").strip()
+        mode = s.get("mode") or "appear"
+        found: dict = {}
+
+        def look():
+            wins = self._window_call(self.d.list_windows)
+            hit = next((w for w in wins if self._window_call(lambda w=w: matches(w, title, how, process))), None)
+            found.clear()
+            if hit:
+                found.update(hit)
+            return bool(hit) == (mode == "appear")
+
+        ok = self._poll(s, look)
+        what = f"«{title}»" + (f" ({process})" if process else "")
+        if mode == "appear" and ok and s.get("activate", True):
+            self._window_call(lambda: self.d.window_do(found["id"], "activate"))
+            from .windows import wait_state
+            info = self._window_call(lambda: wait_state(self.d.get_window, found["id"],
+                                                        lambda i: i.get("active") and i.get("state") != "minimized"))
+            found.update(info or {})
+        if s.get("target"):
+            self.vars[s["target"]] = {"found": bool(found), **found}
+        self.emit({"type": "log", "node": self.node, "message":
+                   (f"окно {what} закрылось" if ok else f"окно {what} всё ещё открыто") if mode == "disappear" else
+                   (f"окно «{found.get('title')}» {found.get('w')}×{found.get('h')} в {found.get('x')},{found.get('y')}"
+                    if ok else f"окна {what} нет")})
+        self.block(s["then"] if ok else s["else"])
+
+    def op_window_action(self, s):
+        from .windows import wait_state
+        name = s.get("window") or "win"
+        saved = self.vars.get(name)
+        if not isinstance(saved, dict) or "id" not in saved:
+            raise StepError(self.node, f"в переменной «{name}» нет окна — сначала блок «Найти окно» с этой переменной")
+        wid, action = saved["id"], s.get("action") or "activate"
+        if self._window_call(lambda: self.d.get_window(wid)) is None:
+            raise StepError(self.node, f"окно «{saved.get('title', '')}» закрыто")
+        geo = {}
+        if action == "move":
+            for k in ("x", "y", "w", "h"):
+                if str(s.get(k) or "").strip():
+                    geo[k] = self.num(s.get(k), {"x": "X", "y": "Y", "w": "ширина", "h": "высота"}[k], integer=True,
+                                      minimum=1 if k in ("w", "h") else None)
+            if not geo:
+                raise StepError(self.node, "задайте положение и/или размер окна")
+        self.act()
+        self._window_call(lambda: self.d.window_do(wid, action, **geo))
+        check = {"activate": lambda i: i.get("active"), "minimize": lambda i: i.get("state") == "minimized",
+                 "maximize": lambda i: i.get("state") == "maximized", "restore": lambda i: i.get("state") == "normal",
+                 "move": lambda i: all(i.get(k) == v for k, v in geo.items()), "close": lambda i: False}[action]
+        info = self._window_call(lambda: wait_state(self.d.get_window, wid, check, 3.0 if action == "close" else 1.5))
+        if action == "close":
+            self.vars[name] = {**saved, "found": info is not None, "closed": info is None}
+            self.emit({"type": "log", "node": self.node, "message":
+                       "окно закрыто" if info is None else "окно не закрылось (возможно, спрашивает о сохранении)"})
+            return
+        if info is not None:
+            self.vars[name] = {**saved, **info}
+        label = {"activate": "активно", "minimize": "свёрнуто", "maximize": "развёрнуто", "restore": "восстановлено",
+                 "move": "перемещено"}[action]
+        self.emit({"type": "log", "node": self.node, "message": f"окно «{saved.get('title', '')}» {label}"
+                   + (f": {info['w']}×{info['h']} в {info['x']},{info['y']}" if info and action in ("move", "maximize", "restore") else "")})
 
     # шаги, которые выполняет сервер платформы (песочница и firewall проекта)
 

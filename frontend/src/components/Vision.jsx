@@ -23,7 +23,7 @@ const MODE_TEXT = {
 }
 
 /** Окно со снимком экрана: выделение прямоугольника (образец / область) или выбор точки. */
-export function ScreenPicker({ projectId, agent, mode, initial, onDone, onClose }) {
+export function ScreenPicker({ projectId, agent, mode, initial, relative = false, onDone, onClose }) {
   const [shot, setShot] = useState(lastShots[projectId] || null)
   const [busy, setBusy] = useState(null) // null | {left}
   const [error, setError] = useState(null)
@@ -39,7 +39,7 @@ export function ScreenPicker({ projectId, agent, mode, initial, onDone, onClose 
     return () => window.removeEventListener('keydown', h)
   }, [onClose])
   useEffect(() => {
-    if (shot && initial && mode !== 'point') {
+    if (shot && initial && mode !== 'point' && !relative) {
       setSel({ x: initial.x - shot.ox, y: initial.y - shot.oy, w: initial.w, h: initial.h })
     }
   }, [shot]) // eslint-disable-line react-hooks/exhaustive-deps
@@ -53,7 +53,7 @@ export function ScreenPicker({ projectId, agent, mode, initial, onDone, onClose 
       const req = await api.screenshot(projectId, { agent, countdown })
       const s = await waitRequest(projectId, req.id, (left) => setBusy({ left }))
       if (!s.data) throw new Error('снимок уже забрали — снимите ещё раз')
-      const next = { data: s.data, w: s.w, h: s.h, ox: s.ox || 0, oy: s.oy || 0, t: Date.now() }
+      const next = { data: s.data, w: s.w, h: s.h, ox: s.ox || 0, oy: s.oy || 0, windows: s.windows || [], t: Date.now() }
       lastShots[projectId] = next
       setShot(next)
     } catch (e) {
@@ -101,9 +101,21 @@ export function ScreenPicker({ projectId, agent, mode, initial, onDone, onClose 
     setSel((s) => (s && s.w < 4 && s.h < 4 ? null : s))
   }
 
+  // «внутри окна»: координаты — от левого верхнего угла окна, в котором выделение / точка
+  const anchor = mode === 'point' ? point : sel
+  const win =
+    relative && anchor && shot
+      ? (shot.windows || []).find((w) => {
+          const x = anchor.x + shot.ox
+          const y = anchor.y + shot.oy
+          return x >= w.x && x < w.x + w.w && y >= w.y && y < w.y + w.h
+        })
+      : null
   const confirm = () => {
-    if (mode === 'point') return onDone({ x: point.x + shot.ox, y: point.y + shot.oy, hex: point.hex })
-    const rect = { x: sel.x + shot.ox, y: sel.y + shot.oy, w: sel.w, h: sel.h }
+    const dx = shot.ox - (win ? win.x : 0)
+    const dy = shot.oy - (win ? win.y : 0)
+    if (mode === 'point') return onDone({ x: point.x + dx, y: point.y + dy, hex: point.hex })
+    const rect = { x: sel.x + dx, y: sel.y + dy, w: sel.w, h: sel.h }
     if (mode === 'region') return onDone(rect)
     const c = document.createElement('canvas')
     c.width = sel.w
@@ -111,7 +123,7 @@ export function ScreenPicker({ projectId, agent, mode, initial, onDone, onClose 
     c.getContext('2d').drawImage(img.current, sel.x, sel.y, sel.w, sel.h, 0, 0, sel.w, sel.h)
     onDone({ image: c.toDataURL('image/png'), rect })
   }
-  const ready = mode === 'point' ? !!point : !!sel && sel.w >= 4 && sel.h >= 4
+  const ready = (mode === 'point' ? !!point : !!sel && sel.w >= 4 && sel.h >= 4) && (!relative || mode === 'image' || !!win)
   const pct = (v, total) => `${(v / total) * 100}%`
 
   return (
@@ -137,7 +149,10 @@ export function ScreenPicker({ projectId, agent, mode, initial, onDone, onClose 
           <button onClick={() => take(0)} disabled={!!busy}>
             Сейчас
           </button>
-          <span className="muted">{shot ? MODE_TEXT[mode] : 'Агент снимет экран своего компьютера. За 3 секунды можно переключиться на нужное окно.'}</span>
+          <span className="muted">
+            {shot ? MODE_TEXT[mode] : 'Агент снимет экран своего компьютера. За 3 секунды можно переключиться на нужное окно.'}
+            {shot && relative && mode !== 'image' && ' Координаты запишутся относительно окна, в котором выделение.'}
+          </span>
         </div>
         {error && <div className="issue error">{error}</div>}
         {shot && (
@@ -161,6 +176,7 @@ export function ScreenPicker({ projectId, agent, mode, initial, onDone, onClose 
                 · точка {point.x + shot.ox}, {point.y + shot.oy} <span className="swatch" style={{ background: point.hex }} /> {point.hex}
               </>
             )}
+            {relative && mode !== 'image' && anchor && (win ? ` · внутри окна «${win.title}» (${anchor.x + shot.ox - win.x}, ${anchor.y + shot.oy - win.y})` : ' · ⚠ не в окне')}
           </span>
           <div className="row">
             <button onClick={onClose}>Отмена</button>
@@ -238,7 +254,7 @@ export function ImageField({ value, onChange, projectId, agent, readOnly }) {
 }
 
 /** Область экрана {x, y, w, h}: выделить на снимке или вписать числа; пусто — весь экран. */
-export function RegionField({ value, onChange, projectId, agent, optional, readOnly }) {
+export function RegionField({ value, onChange, projectId, agent, optional, readOnly, relative = false }) {
   const [picking, setPicking] = useState(false)
   const r = value || null
   const put = (k, v) => {
@@ -269,6 +285,7 @@ export function RegionField({ value, onChange, projectId, agent, optional, readO
           agent={agent}
           mode="region"
           initial={r}
+          relative={relative}
           onClose={() => setPicking(false)}
           onDone={(rect) => {
             onChange(rect)
@@ -281,7 +298,7 @@ export function RegionField({ value, onChange, projectId, agent, optional, readO
 }
 
 /** Цвет #RRGGBB: палитра, текст и «со снимка» (ставит и координаты блока). */
-export function ColorField({ value, onChange, onPickPoint, projectId, agent, readOnly }) {
+export function ColorField({ value, onChange, onPickPoint, projectId, agent, readOnly, relative = false }) {
   const [picking, setPicking] = useState(false)
   const hex = /^#?[0-9a-f]{6}$/i.test(value || '') ? '#' + String(value).replace('#', '').toLowerCase() : '#000000'
   return (
@@ -296,6 +313,7 @@ export function ColorField({ value, onChange, onPickPoint, projectId, agent, rea
           projectId={projectId}
           agent={agent}
           mode="point"
+          relative={relative}
           onClose={() => setPicking(false)}
           onDone={(p) => {
             onPickPoint(p)
@@ -335,6 +353,56 @@ export function VisionTest({ projectId, agent, nodeId, graph }) {
               сходство {found.score} · центр {found.x}, {found.y} · {found.w}×{found.h}
             </div>
           )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** Заголовок окна: текст с {выражениями} и выбор из открытых окон агента. */
+export function WindowTitleField({ value, onChange, onPick, projectId, agent, readOnly }) {
+  const [list, setList] = useState(null) // null | 'busy' | [окна] | {error}
+  const load = async () => {
+    setList('busy')
+    try {
+      const req = await api.agentWindows(projectId, { agent })
+      const r = await waitRequest(projectId, req.id)
+      setList(r.items || [])
+    } catch (e) {
+      setList({ error: e.message })
+    }
+  }
+  return (
+    <div className="window-title-field">
+      <div className="row">
+        <input className="mono" value={value ?? ''} onChange={(e) => onChange(e.target.value)} disabled={readOnly} placeholder="часть заголовка" />
+        <button className="small" onClick={load} disabled={readOnly || list === 'busy'} title="Открытые окна на компьютере агента">
+          {list === 'busy' ? '…' : '🪟 Из открытых'}
+        </button>
+      </div>
+      {list?.error && <div className="issue error">{list.error}</div>}
+      {Array.isArray(list) && (
+        <div className="window-list">
+          {!list.length && <div className="muted">Открытых окон нет</div>}
+          {list.map((w) => (
+            <button
+              key={w.id}
+              className="window-item"
+              onClick={() => {
+                onPick(w)
+                setList(null)
+              }}
+            >
+              <span className="window-title">{w.title || '(без заголовка)'}</span>
+              <span className="muted mono">
+                {w.process || '—'} · {w.w}×{w.h}
+                {w.state !== 'normal' ? ` · ${{ minimized: 'свёрнуто', maximized: 'развёрнуто' }[w.state]}` : ''}
+              </span>
+            </button>
+          ))}
+          <button className="small" onClick={() => setList(null)}>
+            Скрыть
+          </button>
         </div>
       )}
     </div>

@@ -12,8 +12,9 @@
     pick_point {req, countdown}                   через N секунд сообщить позицию курсора
     screenshot {req, countdown}                   через N секунд снять экран (для образцов и областей)
     vision_test {req, step}                       проверить блок «Зрение» на текущем экране, без кликов
+    list_windows {req}                            открытые окна (для выбора заголовка в редакторе)
 Агент → платформа: hello, event, done, op, hotkey, recorded, record_state, point, shot, vision_result,
-stopped_by_user.
+windows, stopped_by_user.
 """
 
 from __future__ import annotations
@@ -117,7 +118,7 @@ class Agent:
         return {"type": "hello", "name": self.name, "version": VERSION,
                 "platform": f"{platform.system()} {platform.release()}", "screen": screen,
                 "stop_hotkey": "+".join(self.stop_keys), "error": self.driver_error,
-                "capabilities": ["input", "record", "hotkeys", "pick_point", "vision"]}
+                "capabilities": ["input", "record", "hotkeys", "pick_point", "vision", "windows"]}
 
     def start(self):
         """Глобальный слушатель клавиатуры: аварийная остановка и горячие клавиши сценариев."""
@@ -198,6 +199,8 @@ class Agent:
             threading.Thread(target=self._screenshot, args=(msg,), daemon=True).start()
         elif kind == "vision_test":
             threading.Thread(target=self._vision_test, args=(msg,), daemon=True).start()
+        elif kind == "list_windows":
+            threading.Thread(target=self._list_windows, args=(msg,), daemon=True).start()
 
     # --- запуск сценария ---
 
@@ -408,7 +411,31 @@ class Agent:
             self.send({"type": "point", "req": req, "left": left})
             time.sleep(1)
         x, y = driver.position()
-        self.send({"type": "point", "req": req, "x": x, "y": y})
+        self.send({"type": "point", "req": req, "x": x, "y": y, "window": self._window_at(driver, x, y)})
+
+    def _windows_of(self, driver) -> list[dict] | None:
+        from .windows import WindowError
+        try:
+            return driver.list_windows() if hasattr(driver, "list_windows") else None
+        except WindowError:
+            return None
+
+    def _window_at(self, driver, x, y) -> dict | None:
+        """Окно под точкой — редактор пересчитает координаты «внутри окна»."""
+        from .windows import at_point
+        wins = self._windows_of(driver)
+        return at_point(wins, x, y) if wins else None
+
+    def _list_windows(self, msg):
+        from .windows import WindowError
+        req = msg.get("req")
+        try:
+            driver = self.get_driver()
+            items = driver.list_windows()
+        except (DriverError, WindowError) as e:
+            self.send({"type": "windows", "req": req, "error": str(e)})
+            return
+        self.send({"type": "windows", "req": req, "items": items})
 
     # --- зрение: снимок экрана и проверка блока ---
 
@@ -429,7 +456,9 @@ class Agent:
                 data = encode_jpeg(img, 92)
             h, w = img.shape[:2]
             ox, oy = driver.origin() if hasattr(driver, "origin") else (0, 0)
-            self.send({"type": "shot", "req": req, "data": data, "w": w, "h": h, "ox": ox, "oy": oy, "left": 0})
+            wins = [w for w in self._windows_of(driver) or [] if w.get("state") != "minimized"]
+            self.send({"type": "shot", "req": req, "data": data, "w": w, "h": h, "ox": ox, "oy": oy, "left": 0,
+                       "windows": wins})
         except (DriverError, VisionError) as e:
             self.send({"type": "shot", "req": req, "error": str(e)})
 
@@ -437,10 +466,10 @@ class Agent:
         """Один блок «Зрение» на текущем экране: без кликов и ожидания — что нашёл и с каким сходством."""
         req = msg.get("req")
         step = dict(msg.get("step") or {})
-        if step.get("op") not in ("image_find", "pixel_check", "ocr"):
+        if step.get("op") not in ("image_find", "pixel_check", "ocr", "window_find"):
             self.send({"type": "vision_result", "req": req, "error": "это не блок «Зрение»"})
             return
-        step.update(action="none", wait="0", then=[], **({"else": []} if step.get("op") != "ocr" else {}))
+        step.update(action="none", activate=False, wait="0", then=[], **({"else": []} if step.get("op") != "ocr" else {}))
         logs = []
         try:
             driver = self.get_driver()

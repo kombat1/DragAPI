@@ -1190,8 +1190,10 @@ async def automation_vision_test(pid: str, body: VisionTestIn, request: Request)
     """«Проверить» блок «Зрение» на текущем экране агента: без кликов и ожидания."""
     graph = body.graph.model_dump()
     node = next((n for n in graph["nodes"] if n.get("id") == body.node), None)
-    if node is None or node.get("type") not in ("image_find", "pixel_check", "ocr"):
-        raise HTTPException(400, "проверить можно только блок «Зрение»")
+    if node is None or node.get("type") not in ("image_find", "pixel_check", "ocr", "window_find"):
+        raise HTTPException(400, "проверить можно только блоки «Зрение» и «Найти окно»")
+    if (node.get("data") or {}).get("window"):
+        raise HTTPException(400, "блок ищет «внутри окна» — проверить его можно только запуском сценария")
     # только этот блок: ошибки в остальных блоках проверке не мешают
     probe = {**graph, "kind": "automation", "nodes": [
         {"id": "__probe", "type": "trigger", "data": {"name": "probe", "kind": "manual"}}, node],
@@ -1205,6 +1207,16 @@ async def automation_vision_test(pid: str, body: VisionTestIn, request: Request)
     except ValueError as e:
         raise HTTPException(409, str(e)) from None
     return req
+
+
+@app.post("/api/projects/{pid}/automation/windows")
+async def automation_windows(pid: str, body: ScreenshotIn, request: Request):
+    """Открытые окна на агенте — выбрать заголовок для «Найти окно»."""
+    agent_id = _agent_from_project(request, pid, body.agent)
+    try:
+        return await hub.ask_agent(agent_id, {"type": "list_windows"}, need="windows", pid=pid)
+    except ValueError as e:
+        raise HTTPException(409, str(e)) from None
 
 
 @app.get("/api/projects/{pid}/automation/request/{req}")

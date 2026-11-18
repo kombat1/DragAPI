@@ -107,6 +107,7 @@ export const api = {
   pickPoint: (pid, body) => request('POST', `/api/projects/${pid}/automation/pick-point`, body),
   screenshot: (pid, body) => request('POST', `/api/projects/${pid}/automation/screenshot`, body),
   visionTest: (pid, body) => request('POST', `/api/projects/${pid}/automation/vision-test`, body),
+  agentWindows: (pid, body) => request('POST', `/api/projects/${pid}/automation/windows`, body),
   agentRequest: (pid, req) => request('GET', `/api/projects/${pid}/automation/request/${req}`),
   pickPointStatus: (pid, req) => request('GET', `/api/projects/${pid}/automation/pick-point/${req}`),
   telegramCheck: (pid, body) => request('POST', `/api/projects/${pid}/telegram/check`, body),

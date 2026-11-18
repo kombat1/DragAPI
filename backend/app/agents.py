@@ -397,12 +397,13 @@ class AgentHub:
                 drop = bool(rec.get("stop_from_ui") and not msg.get("by_user") and downs
                             and stopped_at - downs[-1] <= 1.5)
                 rec.update(state="done", events=len(events), blocks=recording_to_blocks(events, drop_last_click=drop))
-        elif kind in ("point", "shot", "vision_result"):
+        elif kind in ("point", "shot", "vision_result", "windows"):
             p = self.points.get(str(msg.get("req")))
             if p and p["agent"] == conn.id:
-                p.update({k: msg[k] for k in ("x", "y", "left", "error", "data", "w", "h", "ox", "oy", "status", "message", "vars")
+                p.update({k: msg[k] for k in ("x", "y", "left", "error", "data", "w", "h", "ox", "oy", "status", "message", "vars",
+                                                  "window", "windows", "items")
                           if k in msg})
-                if kind == "vision_result" or (kind == "shot" and not msg.get("left")):
+                if kind in ("vision_result", "windows") or (kind == "shot" and not msg.get("left")):
                     p["done"] = True
 
     def _finish(self, run: Run, msg: dict):

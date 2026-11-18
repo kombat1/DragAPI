@@ -22,6 +22,36 @@ class FakeDriver:
         self.held: set[str] = set()
         self.screen = None          # тесты подкладывают «экран» — массив BGR (numpy)
         self.shots = 0
+        self.windows: list[dict] = []   # тесты подкладывают окна (сверху вниз)
+
+    # окна — как у настоящего драйвера: x, y, w, h — клиентская область
+    def list_windows(self):
+        return [dict(w) for w in self.windows]
+
+    def get_window(self, wid):
+        w = next((w for w in self.windows if w["id"] == wid), None)
+        return dict(w) if w else None
+
+    def window_do(self, wid, action, x=None, y=None, w=None, h=None):
+        win = next((w for w in self.windows if w["id"] == wid), None)
+        if win is None:
+            from .windows import WindowError
+            raise WindowError("окно закрыто")
+        self.actions.append(("window", action, wid))
+        if action == "activate" or action == "restore":
+            for other in self.windows:
+                other["active"] = False
+            win.update(active=True, state="normal")
+            self.windows.remove(win)
+            self.windows.insert(0, win)
+        elif action == "minimize":
+            win.update(state="minimized", active=False)
+        elif action == "maximize":
+            win.update(state="maximized")
+        elif action == "move":
+            win.update({k: v for k, v in (("x", x), ("y", y), ("w", w), ("h", h)) if v is not None}, state="normal")
+        elif action == "close":
+            self.windows.remove(win)
 
     def screenshot(self):
         from .vision import VisionError
@@ -107,6 +137,21 @@ class PynputDriver:
     def origin(self):
         from .vision import screen_origin
         return screen_origin()
+
+    def _windows(self):
+        if getattr(self, "_win", None) is None:
+            from .windows import backend
+            self._win = backend()
+        return self._win
+
+    def list_windows(self):
+        return self._windows().list()
+
+    def get_window(self, wid):
+        return self._windows().get(wid)
+
+    def window_do(self, wid, action, x=None, y=None, w=None, h=None):
+        self._windows().do(wid, action, x, y, w, h)
 
     def position(self):
         x, y = self.m.position
