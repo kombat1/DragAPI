@@ -27,7 +27,7 @@ from starlette.routing import Mount, Router
 
 import asyncio
 
-from . import auth, automation, bots, codegen, sandbox, storage, testing, vault
+from . import auth, automation, bots, codegen, packages, sandbox, storage, testing, vault
 from .agents import LOCAL_ID, agent_bundle, hub
 from .config import ConfigError
 from .deploy import deployments, docker_available
@@ -929,6 +929,86 @@ def export_project(pid: str, format: str = "zip"):
                                        "uvicorn main:app --reload\n```\n")
     return Response(buf.getvalue(), media_type="application/zip",
                     headers={"Content-Disposition": f'attachment; filename="{pid}.zip"'})
+
+
+# ---------- перенос проектов: файл .dragapi.json и бот отдельной программой ----------
+
+
+def _package(pid: str, source: str, strip_ids: bool) -> tuple[dict, dict]:
+    project = _load(pid)
+    version = None
+    if source == "published":
+        if project.get("kind") != "bot":
+            raise HTTPException(400, "опубликованная версия бывает только у бота")
+        version, snap = bots.manager.published(pid)
+        if snap is None:
+            raise HTTPException(409, "бот ещё не опубликован — экспортируйте черновик")
+        project = {**project, **snap}
+    elif source != "draft":
+        raise HTTPException(400, "source: draft или published")
+    return project, packages.export_package(project, strip_ids=strip_ids, source=source, version=version)
+
+
+def _disposition(project: dict, pid: str, suffix: str) -> str:
+    """attachment с именем файла по названию проекта (filename* — для кириллицы)."""
+    from urllib.parse import quote
+    ascii_name = (re.sub(r"-[0-9a-f]{6}$", "", pid) or "project") + suffix
+    name = re.sub(r'[\\/:*?"<>|\s]+', "-", str(project.get("name") or "")).strip("-.")[:80]
+    return f'attachment; filename="{ascii_name}"' + (f"; filename*=UTF-8''{quote(name + suffix)}" if name else "")
+
+
+@app.get("/api/projects/{pid}/package")
+def export_package(pid: str, source: str = "draft", strip_ids: bool = False):
+    project, pkg = _package(pid, source, strip_ids)
+    return Response(json.dumps(pkg, ensure_ascii=False, indent=2), media_type="application/json; charset=utf-8",
+                    headers={"Content-Disposition": _disposition(project, pid, ".dragapi.json")})
+
+
+@app.get("/api/projects/{pid}/package/standalone")
+def export_standalone(pid: str, source: str = "published", strip_ids: bool = False):
+    project = _load(pid)
+    if project.get("kind") != "bot":
+        raise HTTPException(400, "отдельной программой можно собрать только бота")
+    if source == "published" and bots.manager.published(pid)[1] is None:
+        source = "draft"               # ещё не публиковали — берём сохранённую версию
+    project, pkg = _package(pid, source, strip_ids)
+    try:
+        bots.compile_bot({**pkg["project"], "env": [{**e, "value": e.get("value") or "x"} for e in pkg["project"]["env"]]})
+    except GraphError as e:
+        raise HTTPException(400, {"message": "в боте есть ошибки — исправьте их перед сборкой",
+                                  "issues": [i.as_dict() for i in e.issues]}) from None
+    folder = re.sub(r"-[0-9a-f]{6}$", "", pid) or "bot"
+    return Response(packages.standalone_zip(pkg, folder), media_type="application/zip",
+                    headers={"Content-Disposition": _disposition(project, pid, "-bot.zip")})
+
+
+class ImportIn(BaseModel):
+    package: dict
+    name: str | None = None
+
+
+@app.post("/api/import")
+def import_project(body: ImportIn, request: Request):
+    """Новый проект из файла экспорта. Секреты нужно вписать заново; сценарии приходят выключенными."""
+    if len(json.dumps(body.package, ensure_ascii=False)) > packages.MAX_BYTES:
+        raise HTTPException(413, "файл слишком большой (больше 5 МБ)")
+    try:
+        data = packages.read_package(body.package)
+    except packages.PackageError as e:
+        raise HTTPException(400, str(e)) from None
+    if body.name and body.name.strip():
+        data["name"] = body.name.strip()[:120]
+    project = storage.create(data["name"], data["kind"])
+    project = storage.save(project["id"], {**project, **data})
+    if _user(request):
+        auth.store.set_owner(project["id"], _user(request)["id"])
+    issues = []
+    try:
+        compiler = {"bot": bots.compile_bot, "automation": automation.compile_automation}.get(data["kind"], compile_project)
+        compiler({**data, "env": [{**e, "value": e.get("value") or "x"} for e in data["env"]]})
+    except GraphError as e:
+        issues = [i.as_dict() for i in e.issues]
+    return {"project": _public_project(project), "missing_secrets": packages.missing_secrets(data), "issues": issues}
 
 
 # ---------- автоматизация ----------

@@ -41,6 +41,7 @@ export const api = {
   blocks: () => request('GET', '/api/blocks'),
   projects: () => request('GET', '/api/projects'),
   createProject: (name, kind = 'api', template = null) => request('POST', '/api/projects', { name, kind, template }),
+  importProject: (pkg, name = null) => request('POST', '/api/import', { package: pkg, name }),
   project: (id) => request('GET', `/api/projects/${id}`),
   save: (id, graph) => request('PUT', `/api/projects/${id}`, graph),
   remove: (id) => request('DELETE', `/api/projects/${id}`),

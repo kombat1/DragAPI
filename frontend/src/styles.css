@@ -578,3 +578,18 @@ kbd { font-family: var(--mono); font-size: 11px; padding: 0 4px; border: 1px sol
 .publish-history .log-row { flex-wrap: wrap; cursor: default; }
 .publish-note { flex: 1; min-width: 120px; }
 .ok-box { color: var(--ok); }
+
+/* перенос проектов: экспорт / импорт */
+.kind-choice.two { grid-template-columns: 1fr 1fr; }
+.kind-card.disabled { opacity: .5; cursor: not-allowed; }
+.export-options { display: flex; flex-direction: column; gap: 10px; }
+.export-row { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; }
+.export-row > button { flex-shrink: 0; }
+.export-check { margin: 4px 0 8px; font-size: 12px; }
+.import-box { border-top: 1px dashed var(--border); margin-top: 12px; padding-top: 12px; font-size: 12px; }
+.import-box .issue { margin-top: 8px; }
+.import-result { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; border-top: 1px dashed var(--border); margin-top: 12px; padding-top: 12px; }
+@media (max-width: 600px) {
+  .export-row { flex-direction: column; align-items: stretch; }
+  .kind-choice.two { grid-template-columns: 1fr; }
+}

@@ -24,6 +24,7 @@ import { DEFAULT_FIREWALL, normalizeFirewall } from './components/FirewallTab.js
 import { newId } from './components/ProjectSettings.jsx'
 import { AgentsModal, RecordModal } from './components/Automation.jsx'
 import { PublishModal } from './components/Bots.jsx'
+import { ExportModal, ImportBox } from './components/Transfer.jsx'
 
 
 const BRANCH_LABELS = {
@@ -257,6 +258,7 @@ function Editor({ catalogs, projectId, onProjectsChanged, me }) {
   const readOnly = role === 'viewer'
   const [membersOpen, setMembersOpen] = useState(false)
   const [deployOpen, setDeployOpen] = useState(false)
+  const [exportOpen, setExportOpen] = useState(false)
   const [name, setName] = useState('')
   const [nodes, setNodes] = useState([])
   const [edges, setEdges] = useState([])
@@ -830,6 +832,9 @@ function Editor({ catalogs, projectId, onProjectsChanged, me }) {
         >
           ⚙ Настройки проекта
         </button>
+        <button onClick={() => setExportOpen(true)} title={`Скачать проект файлом (перенос, резервная копия)${isBot ? ' или бота отдельной программой' : ''}`}>
+          📦 Экспорт
+        </button>
         {me && role === 'owner' && (
           <button onClick={() => setMembersOpen(true)} title="Кто имеет доступ к проекту">
             👥 Доступ
@@ -1026,6 +1031,16 @@ function Editor({ catalogs, projectId, onProjectsChanged, me }) {
       {deployOpen && (
         <DeployModal projectId={projectId} readOnly={readOnly} dirty={dirty} onClose={() => setDeployOpen(false)} />
       )}
+      {exportOpen && (
+        <ExportModal
+          projectId={projectId}
+          kind={kind}
+          dirty={dirty && !readOnly}
+          published={!!pub?.version}
+          onSave={save}
+          onClose={() => setExportOpen(false)}
+        />
+      )}
       {membersOpen && <MembersModal projectId={projectId} me={me} onClose={() => setMembersOpen(false)} />}
       {agentsOpen && <AgentsModal me={me} onClose={() => setAgentsOpen(false)} />}
       {publishOpen && (
@@ -1163,6 +1178,12 @@ function Workspace({ me, onLogout }) {
     setProjectId(p.id)
     setNewOpen(false)
   }
+  const doImported = async (p) => {
+    await loadProjects()
+    setSpace(p.kind || 'api')
+    setProjectId(p.id)
+    setNewOpen(false)
+  }
   useEffect(() => {
     try {
       localStorage.setItem('dragapi.space', space)
@@ -1234,13 +1255,13 @@ function Workspace({ me, onLogout }) {
             <button onClick={createProject}>Создать</button>
           </div>
         )}
-        {newOpen && <NewProjectModal initialKind={space} onCreate={doCreate} onClose={() => setNewOpen(false)} />}
+        {newOpen && <NewProjectModal initialKind={space} onCreate={doCreate} onImported={doImported} onClose={() => setNewOpen(false)} />}
       </div>
     </CatalogContext.Provider>
   )
 }
 
-function NewProjectModal({ onCreate, onClose, initialKind = 'api' }) {
+function NewProjectModal({ onCreate, onImported, onClose, initialKind = 'api' }) {
   const [kind, setKind] = useState(initialKind)
   const [templates, setTemplates] = useState([])
   const [template, setTemplate] = useState('')
@@ -1304,6 +1325,7 @@ function NewProjectModal({ onCreate, onClose, initialKind = 'api' }) {
           <input autoFocus value={name} placeholder={(kind === 'bot' && templates.find((t) => t.id === template)?.title) || { automation: 'Новый сценарий', bot: 'Новый бот' }[kind] || 'Новый проект'} onChange={(e) => setName(e.target.value)} />
         </label>
         {error && <div className="issue error">{error}</div>}
+        <ImportBox onImported={onImported} />
         <div className="modal-foot">
           <button type="button" onClick={onClose}>
             Отмена
