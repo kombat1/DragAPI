@@ -1161,6 +1161,63 @@ def automation_pick_point_status(pid: str, req: str):
     return point
 
 
+class ScreenshotIn(BaseModel):
+    agent: str | None = None
+    countdown: int = 0
+
+
+class VisionTestIn(BaseModel):
+    agent: str | None = None
+    node: str
+    graph: GraphIn
+
+
+@app.post("/api/projects/{pid}/automation/screenshot")
+async def automation_screenshot(pid: str, body: ScreenshotIn, request: Request):
+    """Снимок экрана агента — выделить образец для «Найти картинку» или область для поиска / OCR."""
+    agent_id = _agent_from_project(request, pid, body.agent)
+    countdown = min(max(body.countdown, 0), 10)
+    try:
+        req = await hub.ask_agent(agent_id, {"type": "screenshot", "countdown": countdown}, need="vision",
+                                  left=countdown, pid=pid)
+    except ValueError as e:
+        raise HTTPException(409, str(e)) from None
+    return {k: v for k, v in req.items() if k != "data"}
+
+
+@app.post("/api/projects/{pid}/automation/vision-test")
+async def automation_vision_test(pid: str, body: VisionTestIn, request: Request):
+    """«Проверить» блок «Зрение» на текущем экране агента: без кликов и ожидания."""
+    graph = body.graph.model_dump()
+    node = next((n for n in graph["nodes"] if n.get("id") == body.node), None)
+    if node is None or node.get("type") not in ("image_find", "pixel_check", "ocr"):
+        raise HTTPException(400, "проверить можно только блок «Зрение»")
+    # только этот блок: ошибки в остальных блоках проверке не мешают
+    probe = {**graph, "kind": "automation", "nodes": [
+        {"id": "__probe", "type": "trigger", "data": {"name": "probe", "kind": "manual"}}, node],
+        "edges": [{"id": "__e", "source": "__probe", "target": node["id"]}]}
+    compiled = _compile_automation(pid, probe)
+    step = {k: v for k, v in compiled.scenarios[0].steps[0].items() if k not in ("then", "else")}
+    agent_id = _agent_from_project(request, pid, body.agent)
+    try:
+        req = await hub.ask_agent(agent_id, {"type": "vision_test", "step": step,
+                                             "env": compiled.env_values}, need="vision", pid=pid)
+    except ValueError as e:
+        raise HTTPException(409, str(e)) from None
+    return req
+
+
+@app.get("/api/projects/{pid}/automation/request/{req}")
+def automation_agent_request(pid: str, req: str):
+    """Ответ агента на снимок экрана / проверку блока. Снимок отдаётся один раз (он большой)."""
+    item = hub.points.get(req)
+    if item is None or item.get("pid") != pid:
+        raise HTTPException(404, "запрос не найден")
+    out = dict(item)
+    item.pop("data", None)
+    return out
+
+
 @app.post("/api/projects/{pid}/automation/hook-token")
 def automation_hook_token(pid: str):
     """Новый токен вебхуков сценариев (старый перестаёт работать). Показывается один раз."""

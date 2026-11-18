@@ -593,3 +593,27 @@ kbd { font-family: var(--mono); font-size: 11px; padding: 0 4px; border: 1px sol
   .export-row { flex-direction: column; align-items: stretch; }
   .kind-choice.two { grid-template-columns: 1fr; }
 }
+
+/* ---------- зрение: снимок экрана, образец, область, цвет ---------- */
+.row { display: flex; gap: 6px; align-items: center; }
+.row.wrap { flex-wrap: wrap; }
+.issue.ok { background: color-mix(in srgb, var(--ok) 10%, transparent); color: var(--ok); }
+.modal.screen-picker { width: min(1400px, 100%); }
+.picker-bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 10px 0; font-size: 12px; }
+.shot-wrap { max-height: 70vh; overflow: auto; border: 1px solid var(--border); border-radius: 8px; background: #111; }
+.shot-stage { position: relative; display: inline-block; cursor: crosshair; user-select: none; line-height: 0; }
+.shot-wrap.fit .shot-stage { display: block; }
+.shot-stage img { display: block; max-width: none; }
+.shot-sel { position: absolute; border: 2px solid #f0f; background: rgba(255, 0, 255, .12); box-shadow: 0 0 0 9999px rgba(0, 0, 0, .35); pointer-events: none; }
+.shot-point { position: absolute; width: 14px; height: 14px; margin: -7px 0 0 -7px; border: 2px solid #f0f; border-radius: 50%; box-shadow: 0 0 0 2px #fff; pointer-events: none; }
+.swatch { display: inline-block; width: 12px; height: 12px; border-radius: 3px; border: 1px solid var(--border); vertical-align: middle; }
+.image-field { display: flex; flex-direction: column; gap: 6px; }
+.template-preview { display: flex; align-items: flex-end; gap: 8px; }
+.template-preview img { max-width: 100%; max-height: 120px; border: 1px dashed var(--border); border-radius: 4px; background: repeating-conic-gradient(#ccc 0 25%, #fff 0 50%) 0 0 / 12px 12px; image-rendering: pixelated; }
+.template-empty { padding: 14px; border: 1px dashed var(--border); border-radius: 6px; text-align: center; font-size: 12px; }
+.region-row input { min-width: 0; }
+.region-field { display: flex; flex-direction: column; gap: 6px; }
+.color-field input[type=color] { width: 36px; height: 28px; padding: 0 2px; }
+.color-field input.mono { width: 90px; }
+.vision-test { display: flex; flex-direction: column; gap: 6px; margin: 10px 0; }
+.node-template { display: block; max-width: 100%; max-height: 48px; margin: 2px auto 4px; border-radius: 3px; image-rendering: pixelated; }

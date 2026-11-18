@@ -407,6 +407,120 @@ class Runner:
     def op_stop(self, s):
         raise Finish(s.get("status") or "ok", self.text(s.get("message") or "", "сообщение"))
 
+    # зрение: снимок экрана → поиск картинки, цвет, текст
+
+    def _vision(self):
+        from . import vision
+        return vision
+
+    def _region(self, s):
+        r = s.get("region")
+        return (r["x"], r["y"], r["w"], r["h"]) if r else None
+
+    def _poll(self, s, look):
+        """look() до успеха или пока не истечёт «Ждать до, с» (0 — проверить один раз)."""
+        wait = self.num(s.get("wait"), "ждать", minimum=0, maximum=86400, default=0)
+        end = time.monotonic() + wait
+        while True:
+            self.check()
+            if look():
+                return True
+            if time.monotonic() >= end:
+                return False
+            self.sleep(min(0.25, max(0.0, end - time.monotonic())))
+
+    def _shot(self, region):
+        """Снимок (области) экрана и смещение его левого верхнего угла в координатах экрана."""
+        v = self._vision()
+        ox, oy = self.d.origin() if hasattr(self.d, "origin") else (0, 0)
+        if region:
+            region = (region[0] - ox, region[1] - oy, region[2], region[3])
+        try:
+            img, (x, y) = v.crop(self.d.screenshot(), region)
+        except v.VisionError as e:
+            raise StepError(self.node, str(e)) from None
+        return img, (x + ox, y + oy)
+
+    def op_image_find(self, s):
+        v = self._vision()
+        try:
+            template = v.decode_image(s.get("image"))
+        except v.VisionError as e:
+            raise StepError(self.node, str(e)) from None
+        conf = self.num(s.get("confidence"), "точность", minimum=0.5, maximum=1, default=0.85)
+        region, mode = self._region(s), s.get("mode") or "appear"
+        best: dict = {}
+
+        def look():
+            img, (ox, oy) = self._shot(region)
+            m = v.find_template(img, template, grayscale=bool(s.get("grayscale")))
+            m.update(left=m["left"] + ox, top=m["top"] + oy, x=m["x"] + ox, y=m["y"] + oy)
+            best.clear()
+            best.update(m)
+            return (m["score"] >= conf) == (mode == "appear")
+
+        ok = self._poll(s, look)
+        found = best.get("score", 0) >= conf
+        info = {"found": found, **best}
+        if s.get("target"):
+            self.vars[s["target"]] = info
+        score = f"сходство {best.get('score', 0):.2f}"
+        if mode == "appear":
+            self.emit({"type": "log", "node": self.node, "message":
+                       f"найдено в {best['x']},{best['y']} ({score})" if found else
+                       f"не найдено: лучшее {score} < {conf:g}"})
+        else:
+            self.emit({"type": "log", "node": self.node, "message":
+                       "картинка исчезла" if ok else f"картинка всё ещё на экране ({score})"})
+        action = s.get("action") or "none"
+        if ok and found and action != "none":
+            dx = self.num(s.get("dx"), "смещение X", integer=True, default=0)
+            dy = self.num(s.get("dy"), "смещение Y", integer=True, default=0)
+            self.glide((best["x"] + dx, best["y"] + dy), self.num(s.get("duration"), "перемещение", minimum=0,
+                                                                 maximum=60, default=0))
+            if action != "move":
+                self.act()
+                self.d.click("right" if action == "right" else "left", 2 if action == "double" else 1)
+        self.block(s["then"] if ok else s["else"])
+
+    def op_pixel_check(self, s):
+        v = self._vision()
+        x = self.num(s.get("x"), "X", integer=True)
+        y = self.num(s.get("y"), "Y", integer=True)
+        try:
+            want = v.parse_color(self.text(s.get("color"), "цвет"))
+        except v.VisionError as e:
+            raise StepError(self.node, str(e)) from None
+        tol = self.num(s.get("tolerance"), "допуск", integer=True, minimum=0, maximum=255, default=10)
+        seen: dict = {}
+
+        def look():
+            img, _ = self._shot((x, y, 1, 1))   # точка за краем экрана → ошибка «за пределами»
+            rgb = v.pixel_rgb(img, 0, 0)
+            seen.update(v.color_info(rgb), distance=v.color_distance(rgb, want))
+            return seen["distance"] <= tol
+
+        ok = self._poll(s, look)
+        if s.get("target"):
+            self.vars[s["target"]] = {**seen, "match": ok}
+        self.emit({"type": "log", "node": self.node,
+                   "message": f"цвет {seen.get('hex')} в {x},{y} — {'совпадает' if ok else 'не совпадает'}"
+                              f" (отличие {seen.get('distance')}, допуск {tol})"})
+        self.block(s["then"] if ok else s["else"])
+
+    def op_ocr(self, s):
+        v = self._vision()
+        region = self._region(s)
+        img, _ = self._shot(region)
+        try:
+            text = v.ocr(img, s.get("lang") or "rus+eng", digits=bool(s.get("digits")))
+        except v.VisionError as e:
+            raise StepError(self.node, str(e)) from None
+        if s.get("digits"):
+            text = text.replace(" ", "")
+        self.vars[s.get("target") or "text"] = text
+        self.emit({"type": "log", "node": self.node, "message": f"текст: {text[:300]!r}"})
+
     # шаги, которые выполняет сервер платформы (песочница и firewall проекта)
 
     def _server(self, op, payload):

@@ -10,7 +10,10 @@
     hotkeys {items: [{keys, pid, trigger}]}        горячие клавиши включённых сценариев
     record_start {rec_id, countdown} / record_stop {rec_id}
     pick_point {req, countdown}                   через N секунд сообщить позицию курсора
-Агент → платформа: hello, event, done, op, hotkey, recorded, record_state, point, stopped_by_user.
+    screenshot {req, countdown}                   через N секунд снять экран (для образцов и областей)
+    vision_test {req, step}                       проверить блок «Зрение» на текущем экране, без кликов
+Агент → платформа: hello, event, done, op, hotkey, recorded, record_state, point, shot, vision_result,
+stopped_by_user.
 """
 
 from __future__ import annotations
@@ -114,7 +117,7 @@ class Agent:
         return {"type": "hello", "name": self.name, "version": VERSION,
                 "platform": f"{platform.system()} {platform.release()}", "screen": screen,
                 "stop_hotkey": "+".join(self.stop_keys), "error": self.driver_error,
-                "capabilities": ["input", "record", "hotkeys", "pick_point"]}
+                "capabilities": ["input", "record", "hotkeys", "pick_point", "vision"]}
 
     def start(self):
         """Глобальный слушатель клавиатуры: аварийная остановка и горячие клавиши сценариев."""
@@ -191,6 +194,10 @@ class Agent:
             self._record_stop(msg.get("rec_id"), by_user=False)
         elif kind == "pick_point":
             threading.Thread(target=self._pick_point, args=(msg,), daemon=True).start()
+        elif kind == "screenshot":
+            threading.Thread(target=self._screenshot, args=(msg,), daemon=True).start()
+        elif kind == "vision_test":
+            threading.Thread(target=self._vision_test, args=(msg,), daemon=True).start()
 
     # --- запуск сценария ---
 
@@ -402,3 +409,47 @@ class Agent:
             time.sleep(1)
         x, y = driver.position()
         self.send({"type": "point", "req": req, "x": x, "y": y})
+
+    # --- зрение: снимок экрана и проверка блока ---
+
+    MAX_SHOT_CHARS = 12_000_000
+
+    def _screenshot(self, msg):
+        from .vision import VisionError, encode_jpeg, encode_png
+        req = msg.get("req")
+        countdown = max(0, min(int(msg.get("countdown") or 0), 10))
+        try:
+            driver = self.get_driver()
+            for left in range(countdown, 0, -1):
+                self.send({"type": "shot", "req": req, "left": left})
+                time.sleep(1)
+            img = driver.screenshot()
+            data = encode_png(img)
+            if len(data) > self.MAX_SHOT_CHARS:      # огромный экран: JPEG, чтобы влезть в сообщение
+                data = encode_jpeg(img, 92)
+            h, w = img.shape[:2]
+            ox, oy = driver.origin() if hasattr(driver, "origin") else (0, 0)
+            self.send({"type": "shot", "req": req, "data": data, "w": w, "h": h, "ox": ox, "oy": oy, "left": 0})
+        except (DriverError, VisionError) as e:
+            self.send({"type": "shot", "req": req, "error": str(e)})
+
+    def _vision_test(self, msg):
+        """Один блок «Зрение» на текущем экране: без кликов и ожидания — что нашёл и с каким сходством."""
+        req = msg.get("req")
+        step = dict(msg.get("step") or {})
+        if step.get("op") not in ("image_find", "pixel_check", "ocr"):
+            self.send({"type": "vision_result", "req": req, "error": "это не блок «Зрение»"})
+            return
+        step.update(action="none", wait="0", then=[], **({"else": []} if step.get("op") != "ocr" else {}))
+        logs = []
+        try:
+            driver = self.get_driver()
+        except DriverError as e:
+            self.send({"type": "vision_result", "req": req, "error": str(e)})
+            return
+        runner = Runner({"steps": [step]}, driver, env=msg.get("env"), inputs=msg.get("inputs"),
+                        emit=lambda e: e.get("type") == "log" and logs.append(e.get("message")),
+                        limits={"max_seconds": 60, "failsafe_corner": False})
+        result = runner.run()
+        self.send({"type": "vision_result", "req": req, "status": result["status"],
+                   "message": result["message"] or "; ".join(logs), "vars": result["vars"]})

@@ -289,7 +289,7 @@ const AUTH_SCHEMES = {
   bearer: 'Bearer-токен (Authorization)',
 }
 
-export default function Inspector({ node, onChange, onDelete, issues, availableFields, models, env, sandbox, firewall, projectId, agent, botRoles = [], onOpenSettings, onTestEndpoint, sandboxInfo, readOnly = false, multiCount = 0 }) {
+export default function Inspector({ node, onChange, onDelete, issues, availableFields, models, env, sandbox, firewall, projectId, agent, botRoles = [], onOpenSettings, onTestEndpoint, sandboxInfo, readOnly = false, multiCount = 0, graph }) {
   const [errorLine, setErrorLine] = useState(null)
   const [editorMode, setEditorModeState] = useState(loadEditorMode) // null | 'half' | 'full'
   const setEditorMode = (mode) => {
@@ -403,7 +403,7 @@ export default function Inspector({ node, onChange, onDelete, issues, availableF
             ))}
           </div>
         )}
-        <AutoForm spec={spec} d={d} set={set} projectId={projectId} agent={agent} variables={availableFields} roles={botRoles} />
+        <AutoForm spec={spec} d={d} set={set} projectId={projectId} agent={agent} variables={availableFields} roles={botRoles} nodeId={node.id} graph={graph} readOnly={readOnly} />
         {availableFields.length > 0 && node.type !== 'trigger' && (
           <div className="available">
             <div className="field-label">Переменные на входе блока</div>

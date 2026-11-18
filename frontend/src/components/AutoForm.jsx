@@ -3,6 +3,7 @@ import { api } from '../api.js'
 import ListEditor from './ListEditor.jsx'
 import { HelpButton } from './ExprHelp.jsx'
 import { AutomationProjectSelect, ButtonsInput, LinksInput } from './Bots.jsx'
+import { ColorField, ImageField, RegionField, VisionTest } from './Vision.jsx'
 
 // Форма блока автоматизации строится по описанию полей из каталога (backend: app/automation.py).
 
@@ -128,7 +129,7 @@ function visible(f, d, defaults) {
   return Object.entries(f.show_if).every(([k, vals]) => vals.includes(d[k] ?? defaults[k]))
 }
 
-export default function AutoForm({ spec, d, set, projectId, agent, variables, roles = [] }) {
+export default function AutoForm({ spec, d, set, projectId, agent, variables, roles = [], nodeId, graph, readOnly = false }) {
   const fields = spec.fields.filter((f) => visible(f, d, spec.defaults))
   const out = []
   for (let i = 0; i < fields.length; i++) {
@@ -152,15 +153,43 @@ export default function AutoForm({ spec, d, set, projectId, agent, variables, ro
       i++
       continue
     }
-    out.push(<FieldInput key={f.key} f={f} d={d} set={set} variables={variables} roles={roles} />)
+    out.push(<FieldInput key={f.key} f={f} d={d} set={set} variables={variables} roles={roles} projectId={projectId} agent={agent} readOnly={readOnly} />)
+  }
+  if (spec.group === 'Зрение' && graph && nodeId) {
+    out.push(<VisionTest key="__vision_test" projectId={projectId} agent={agent} nodeId={nodeId} graph={graph} />)
   }
   return <>{out}</>
 }
 
-function FieldInput({ f, d, set, variables, roles }) {
+function FieldInput({ f, d, set, variables, roles, projectId, agent, readOnly }) {
   const value = d[f.key]
   const put = (v) => set({ [f.key]: v })
   switch (f.kind) {
+    case 'image':
+      return (
+        <Field label={f.label} hint={f.hint}>
+          <ImageField value={value} onChange={put} projectId={projectId} agent={agent} readOnly={readOnly} />
+        </Field>
+      )
+    case 'region':
+      return (
+        <Field label={f.label} hint={f.hint}>
+          <RegionField value={value} onChange={put} projectId={projectId} agent={agent} optional={f.optional} readOnly={readOnly} />
+        </Field>
+      )
+    case 'color':
+      return (
+        <Field label={f.label} hint={f.hint}>
+          <ColorField
+            value={value}
+            onChange={put}
+            projectId={projectId}
+            agent={agent}
+            readOnly={readOnly}
+            onPickPoint={(p) => set({ [f.key]: p.hex, ...('x' in d || 'y' in d ? { x: String(p.x), y: String(p.y) } : {}) })}
+          />
+        </Field>
+      )
     case 'roles': {
       const chosen = value || []
       return (
@@ -386,6 +415,15 @@ export function autoSummary(type, d) {
       return d.status === 'error' ? `ошибка${d.message ? `: ${d.message}` : ''}` : 'успех'
     case 'http':
       return `${d.method} ${d.url} → ${d.target}`
+    case 'image_find': {
+      const what = d.image ? '' : '⚠ нет образца · '
+      const act = d.mode === 'disappear' ? 'ждать, пока исчезнет' : { none: 'найти', click: 'найти и кликнуть', double: 'найти и 2× кликнуть', right: 'найти и правый клик', move: 'найти и навести' }[d.action] || 'найти'
+      return `${what}${act}${Number(d.wait) ? ` · до ${d.wait} с` : ''}${d.region ? ' · в области' : ''}`
+    }
+    case 'pixel_check':
+      return `(${d.x}, ${d.y}) = ${d.color}${Number(d.wait) ? ` · ждать до ${d.wait} с` : ''}`
+    case 'ocr':
+      return `${d.region ? `${d.region.w}×${d.region.h} в (${d.region.x}, ${d.region.y})` : '⚠ нет области'} → ${d.target}${d.digits ? ' (цифры)' : ''}`
     case 'telegram':
       return `«${String(d.text || '').slice(0, 40)}»${d.chat ? ` → ${d.chat}` : ''}`
     case 'bot_command':

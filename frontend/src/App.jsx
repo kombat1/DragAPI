@@ -977,6 +977,7 @@ function Editor({ catalogs, projectId, onProjectsChanged, me }) {
           agent={automation.agent}
           botRoles={bot.roles ?? ['moderator']}
           sandboxInfo={sandboxInfo}
+          graph={isAuto ? graph : null}
           onOpenSettings={(tab) => setSettingsOpen(tab || (isAuto ? 'automation' : isBot ? 'bot' : 'models'))}
           onTestEndpoint={(id) => {
             setFocusEndpoint(null)

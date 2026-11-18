@@ -199,6 +199,7 @@ export default function BlockNode({ id, type, data, selected }) {
         )}
       </div>
       <div className="block-body">
+        {type === 'image_find' && data.image && <img className="node-template" src={data.image} alt="" draggable={false} />}
         {spec.fields ? <div className="row-line auto-summary">{autoSummary(type, data)}</div> : <Summary type={type} data={data} />}
       </div>
       {issues.length > 0 && <div className={`block-issue ${level}`}>{issues[0].message}</div>}

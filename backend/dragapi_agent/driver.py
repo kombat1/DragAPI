@@ -20,6 +20,15 @@ class FakeDriver:
         self.pos = tuple(pos)
         self.actions: list[tuple] = []
         self.held: set[str] = set()
+        self.screen = None          # тесты подкладывают «экран» — массив BGR (numpy)
+        self.shots = 0
+
+    def screenshot(self):
+        from .vision import VisionError
+        if self.screen is None:
+            raise VisionError("у тестового драйвера нет экрана")
+        self.shots += 1
+        return self.screen() if callable(self.screen) else self.screen
 
     def screen_size(self):
         return self.size
@@ -90,6 +99,14 @@ class PynputDriver:
         except Exception:  # noqa: BLE001
             pass
         return None
+
+    def screenshot(self):
+        from .vision import grab_screen
+        return grab_screen()
+
+    def origin(self):
+        from .vision import screen_origin
+        return screen_origin()
 
     def position(self):
         x, y = self.m.position

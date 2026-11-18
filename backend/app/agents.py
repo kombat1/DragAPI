@@ -276,7 +276,7 @@ class AgentHub:
             if rec["agent"] == conn.id and rec["state"] in ("starting", "countdown", "recording"):
                 rec.update(state="error", message="агент отключился")
         for p in self.points.values():
-            if p["agent"] == conn.id and "x" not in p and "error" not in p:
+            if p["agent"] == conn.id and not p.get("done") and "x" not in p and "error" not in p:
                 p["error"] = "агент отключился"
 
     async def websocket(self, ws):
@@ -397,10 +397,13 @@ class AgentHub:
                 drop = bool(rec.get("stop_from_ui") and not msg.get("by_user") and downs
                             and stopped_at - downs[-1] <= 1.5)
                 rec.update(state="done", events=len(events), blocks=recording_to_blocks(events, drop_last_click=drop))
-        elif kind == "point":
+        elif kind in ("point", "shot", "vision_result"):
             p = self.points.get(str(msg.get("req")))
             if p and p["agent"] == conn.id:
-                p.update({k: msg[k] for k in ("x", "y", "left", "error") if k in msg})
+                p.update({k: msg[k] for k in ("x", "y", "left", "error", "data", "w", "h", "ox", "oy", "status", "message", "vars")
+                          if k in msg})
+                if kind == "vision_result" or (kind == "shot" and not msg.get("left")):
+                    p["done"] = True
 
     def _finish(self, run: Run, msg: dict):
         if run.finished is not None:
@@ -686,17 +689,23 @@ class AgentHub:
         if conn is not None:
             await self._send(conn, {"type": "record_stop", "rec_id": rec_id})
 
-    async def pick_point(self, agent_id: str, countdown: int) -> dict:
+    async def ask_agent(self, agent_id: str, msg: dict, *, need: str | None = None, **state) -> dict:
+        """Короткий запрос к агенту (позиция курсора, снимок экрана, проверка блока): ответ — в self.points."""
         conn = self.conns.get(agent_id)
         if conn is None:
             raise ValueError("агент не в сети")
+        if need and need not in ((conn.info or {}).get("capabilities") or []):
+            raise ValueError("агент устарел и не умеет этого — скачайте и запустите агента заново")
         req = uuid.uuid4().hex[:10]
-        self.points[req] = {"id": req, "agent": agent_id, "left": countdown}
+        self.points[req] = {"id": req, "agent": agent_id, **state}
         if len(self.points) > 100:
             for old in list(self.points)[:-100]:
                 del self.points[old]
-        await self._send(conn, {"type": "pick_point", "req": req, "countdown": countdown})
+        await self._send(conn, {**msg, "req": req})
         return self.points[req]
+
+    async def pick_point(self, agent_id: str, countdown: int) -> dict:
+        return await self.ask_agent(agent_id, {"type": "pick_point", "countdown": countdown}, left=countdown)
 
 
 def _find_step(steps: list[dict], node: str) -> dict | None:
@@ -725,13 +734,17 @@ def agent_bundle() -> bytes:
         for f in sorted((root / "dragapi_agent").glob("*.py")):
             z.write(f, f"dragapi_agent/{f.name}")
         z.write(root / "app" / "expr.py", "dragapi_agent/expr.py")
-        z.writestr("requirements.txt", "pynput>=1.7\nwebsockets>=12\n")
+        z.writestr("requirements.txt", "pynput>=1.7\nwebsockets>=12\n"
+                   "# блоки «Зрение» (поиск картинки, цвет пикселя, OCR):\nnumpy>=1.26\nopencv-python-headless>=4.8\nmss>=9\n")
         z.writestr("README.txt", (
             "Агент автоматизации DragAPI\n\n"
             "1. Python 3.10+:  python -m venv .venv && .venv/bin/pip install -r requirements.txt\n"
             "   (Windows: .venv\\Scripts\\pip install -r requirements.txt)\n"
             "2. Запуск:  DRAGAPI_AGENT_TOKEN=<токен> .venv/bin/python -m dragapi_agent --server http://<платформа>:8765\n\n"
             "Linux: нужен сеанс X11 (на Wayland управление вводом ограничено).\n"
+            "Распознавание текста (блок «Прочитать текст»): программа tesseract —\n"
+            "   Linux: sudo apt install tesseract-ocr tesseract-ocr-rus;  Windows: установщик UB Mannheim,\n"
+            "   путь к tesseract.exe — в переменной DRAGAPI_TESSERACT, если его нет в PATH.\n"
             "Аварийная остановка сценария: Ctrl+Alt+Esc или курсор в левый верхний угол экрана.\n"))
     return buf.getvalue()
 

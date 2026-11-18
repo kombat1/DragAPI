@@ -244,6 +244,68 @@ AUTO_BLOCKS: dict[str, dict] = {
                    F(key="target", label="Ответ — в переменную", kind="text", optional=True,
                      hint="True / False, или None при таймауте")],
     },
+    "image_find": {
+        "title": "Найти картинку", "group": "Зрение", "color": "#c026d3", "icon": "🔍",
+        "description": "Найти образец на экране (кнопку, иконку): ждать, пока появится или исчезнет, и кликнуть "
+                       "по найденному. «да» — нашли (исчезла), «нет» — не дождались.",
+        "inputs": ["flow"], "output": ["flow"],
+        "branches": [{"id": "true", "label": "да"}, {"id": "false", "label": "нет"}],
+        "defaults": {"image": "", "region": None, "mode": "appear", "wait": "5", "confidence": "0.85",
+                     "grayscale": False, "action": "click", "dx": "0", "dy": "0", "duration": "0.2", "target": "found"},
+        "fields": [F(key="image", label="Образец", kind="image",
+                     hint="Снимок экрана → выделите мышкой то, что искать. Или загрузите PNG."),
+                   F(key="mode", label="Ждать, пока картинка", kind="select",
+                     options=[["appear", "появится"], ["disappear", "исчезнет"]]),
+                   F(key="wait", label="Ждать до, с", kind="num", optional=True,
+                     hint="0 — проверить один раз; проверка ~4 раза в секунду"),
+                   F(key="region", label="Где искать", kind="region", optional=True,
+                     hint="Пусто — весь экран. Область меньше — поиск быстрее и без ложных совпадений"),
+                   F(key="confidence", label="Точность совпадения (0.5–1)", kind="num", optional=True,
+                     hint="0.85 — обычно; ниже — находит похожее, выше — только точную копию"),
+                   F(key="grayscale", label="Без учёта цвета", kind="bool"),
+                   F(key="action", label="Когда нашли", kind="select", show_if={"mode": ["appear"]},
+                     options=[["none", "Ничего — только ветка «да»"], ["click", "Клик по центру"],
+                              ["double", "Двойной клик"], ["right", "Правый клик"], ["move", "Навести курсор"]]),
+                   F(key="dx", label="Смещение X", kind="num", optional=True, group="point",
+                     show_if={"mode": ["appear"], "action": ["click", "double", "right", "move"]},
+                     hint="От центра найденного: например, поле ввода справа от надписи"),
+                   F(key="dy", label="Смещение Y", kind="num", optional=True, group="point",
+                     show_if={"mode": ["appear"], "action": ["click", "double", "right", "move"]}),
+                   F(key="target", label="Результат — в переменную", kind="text", optional=True,
+                     hint="found['found'] — нашли ли; found['x'], found['y'] — центр; ещё left, top, w, h, score")],
+    },
+    "pixel_check": {
+        "title": "Цвет пикселя", "group": "Зрение", "color": "#c026d3", "icon": "🎨",
+        "description": "Проверить цвет точки экрана (индикатор, полоска здоровья, кнопка стала активной). "
+                       "Можно ждать, пока цвет станет нужным.",
+        "inputs": ["flow"], "output": ["flow"],
+        "branches": [{"id": "true", "label": "да"}, {"id": "false", "label": "нет"}],
+        "defaults": {"x": "500", "y": "300", "color": "#00ff00", "tolerance": "10", "wait": "0", "target": "pixel"},
+        "fields": [F(key="x", label="X", kind="num", group="point", hint=""),
+                   F(key="y", label="Y", kind="num", group="point"),
+                   F(key="color", label="Ожидаемый цвет (#RRGGBB)", kind="color"),
+                   F(key="tolerance", label="Допуск (0–255)", kind="num", optional=True,
+                     hint="Насколько может отличаться каждый канал: 0 — точно этот цвет"),
+                   F(key="wait", label="Ждать до, с", kind="num", optional=True,
+                     hint="0 — проверить один раз"),
+                   F(key="target", label="Цвет — в переменную", kind="text", optional=True,
+                     hint="pixel['hex'] — цвет, pixel['r'], ['g'], ['b'], pixel['match'] — совпал ли")],
+        "required": ["x", "y"],
+    },
+    "ocr": {
+        "title": "Прочитать текст", "group": "Зрение", "color": "#c026d3", "icon": "🔤",
+        "description": "Распознать текст в области экрана (OCR) и положить в переменную — дальше «Условие»: "
+                       "contains(text, 'Готово'), int(text) > 100.",
+        "inputs": ["flow"], "output": ["flow"],
+        "defaults": {"region": None, "lang": "rus+eng", "digits": False, "target": "text"},
+        "fields": [F(key="region", label="Область", kind="region",
+                     hint="Выделите на снимке экрана только нужный текст — так точнее и быстрее"),
+                   F(key="lang", label="Язык", kind="select",
+                     options=[["rus+eng", "Русский и английский"], ["rus", "Русский"], ["eng", "Английский"]]),
+                   F(key="digits", label="Только цифры (счётчики, цены)", kind="bool"),
+                   F(key="target", label="Текст — в переменную", kind="text")],
+        "required": ["region"],
+    },
     "code": {
         "title": "Python-код", "group": "Данные", "color": "#0f766e", "icon": "🐍",
         "description": "run(data, env) в песочнице платформы; data — переменные сценария.",
@@ -401,6 +463,25 @@ class CompiledAutomation:
 
     def scenario(self, name: str) -> Scenario | None:
         return next((s for s in self.scenarios if s.trigger.name == name), None)
+
+
+IMAGE_RE = re.compile(r"^data:image/(png|jpeg|jpg|webp|bmp);base64,[A-Za-z0-9+/=]+$")
+MAX_IMAGE_CHARS = 2_800_000   # ~2 МБ картинки в base64
+
+
+def _region(value) -> dict | None | bool:
+    """{x, y, w, h} → целые; None — не задана; False — ошибка."""
+    if value in (None, "", {}):
+        return None
+    if not isinstance(value, dict):
+        return False
+    try:
+        r = {k: int(value[k]) for k in ("x", "y", "w", "h")}
+    except (KeyError, TypeError, ValueError):
+        return False
+    if r["w"] < 1 or r["h"] < 1 or max(abs(v) for v in r.values()) > 100_000:   # x, y < 0 — монитор слева
+        return False
+    return r
 
 
 def _check_expr(source, what) -> str | None:
@@ -606,12 +687,12 @@ class _Walker:
             if ntype == "trigger":
                 self.fail(cur, "«Старт» может быть только началом сценария")
                 return None
-            if ntype in ("condition", "tg_ask"):
+            if ntype in ("condition", "tg_ask", "image_find", "pixel_check"):
                 step = self._step(cur, ntype, data)
                 then = self.walk(self.outgoing.get((cur, "true")), frozenset(path), loop)
                 other = self.walk(self.outgoing.get((cur, "false")), frozenset(path), loop)
                 if step is not None and then is not None and other is not None:
-                    op = "if" if ntype == "condition" else "tg_ask"
+                    op = "if" if ntype == "condition" else ntype
                     steps.append({**step, "op": op, "then": then, "else": other})
                 return steps   # продолжение — внутри веток
             if ntype in ("repeat", "while"):
@@ -699,6 +780,27 @@ class _Walker:
                 if not items and ok:
                     fail("нет ни одного присваивания")
                 step[key] = items
+            elif kind == "image":
+                text = str(value or "").strip()
+                if not text:
+                    fail("нет образца: «📷 Снимок экрана» → выделите, что искать, или загрузите PNG")
+                elif not IMAGE_RE.match(text):
+                    fail("образец: нужна картинка PNG или JPEG")
+                elif len(text) > MAX_IMAGE_CHARS:
+                    fail("образец больше 2 МБ — выделите область поменьше")
+                step[key] = text
+            elif kind == "region":
+                region = _region(value)
+                if region is False:
+                    fail(f"«{label}»: x, y, ширина и высота — целые числа, ширина и высота больше 0")
+                elif region is None and required:
+                    fail(f"«{label}»: выделите область на снимке экрана")
+                step[key] = region or None
+            elif kind == "color":
+                text = str(value or "").strip()
+                if not re.fullmatch(r"#?[0-9a-fA-F]{6}", text):
+                    fail(f"«{label}»: цвет в формате #RRGGBB, например #22c55e")
+                step[key] = "#" + text.lstrip("#").lower()
             elif kind == "kv":
                 items = []
                 for a in value or []:
