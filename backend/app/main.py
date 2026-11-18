@@ -624,8 +624,12 @@ async def delete_project(pid: str):
     envs.remove(pid)
     hub.refresh_project(pid, None)
     await bots.manager.stop(pid)
+    await bots.manager.stop(pid, test=True)
     bots.manager.emulators.pop(pid, None)
     (bots.BOTS_DIR / f"{pid}.json").unlink(missing_ok=True)
+    (bots.BOTS_DIR / f"{pid}.test.json").unlink(missing_ok=True)
+    import shutil as _shutil
+    _shutil.rmtree(bots.BOTS_DIR / pid, ignore_errors=True)
     try:
         storage.delete(pid)
     except storage.NotFound:
@@ -1166,16 +1170,30 @@ def bots_catalog():
 
 @app.get("/api/projects/{pid}/bot/status")
 def bot_status(pid: str):
-    _bot_project(pid)
+    project = _bot_project(pid)
     live = bots.manager.live.get(pid)
-    return {**bots.manager.status(pid), "log": list(live.engine.log)[:150] if live else []}
+    test = bots.manager.live.get(bots.manager.key(pid, True))
+    log = sorted([*(live.engine.log if live else []), *({**e, "test": True} for e in (test.engine.log if test else []))],
+                 key=lambda e: -e["t"])[:150]
+    return {**bots.manager.status(pid), "log": log, "test": bots.manager.status(pid, test=True),
+            "publish": _publish_state(pid, project)}
+
+
+def _publish_state(pid: str, project: dict) -> dict:
+    """Опубликованная версия и отличается ли от неё сохранённый черновик."""
+    pubs = bots.Publications(pid)
+    version, published = bots.manager.published(pid)
+    meta = next((h for h in pubs.history() if h["version"] == version), None) if version else None
+    diff = bots.diff_summary(published, project)
+    return {"version": version, "meta": meta, "draft_differs": published is None or not diff["same"],
+            "diff": diff}
 
 
 @app.post("/api/projects/{pid}/bot/start")
-async def bot_start(pid: str):
+async def bot_start(pid: str, test: bool = False):
     _bot_project(pid)
     try:
-        await bots.manager.start(pid)
+        await bots.manager.start(pid, test=test)
     except GraphError as e:
         raise HTTPException(400, {"message": "в графе бота есть ошибки", "issues": [i.as_dict() for i in e.issues]})
     except (ValueError, vault.VaultError) as e:
@@ -1184,10 +1202,49 @@ async def bot_start(pid: str):
 
 
 @app.post("/api/projects/{pid}/bot/stop")
-async def bot_stop(pid: str):
+async def bot_stop(pid: str, test: bool = False):
     _bot_project(pid)
-    await bots.manager.stop(pid)
+    await bots.manager.stop(pid, test=test)
     return bot_status(pid)
+
+
+class PublishIn(BaseModel):
+    note: str = ""
+
+
+@app.get("/api/projects/{pid}/bot/publish")
+def bot_publications(pid: str):
+    project = _bot_project(pid)
+    return {**_publish_state(pid, project), "history": bots.Publications(pid).history()}
+
+
+@app.post("/api/projects/{pid}/bot/publish")
+def bot_publish(pid: str, body: PublishIn, request: Request):
+    """Опубликовать сохранённый черновик: работающий бот сразу переходит на него."""
+    _bot_project(pid)
+    user = _user(request)
+    try:
+        result = bots.manager.publish(pid, body.note.strip(), user["username"] if user else None)
+    except GraphError as e:
+        raise HTTPException(400, {"message": "в черновике есть ошибки — опубликовать нельзя",
+                                  "issues": [i.as_dict() for i in e.issues]})
+    except (ValueError, vault.VaultError) as e:
+        raise HTTPException(409, {"message": str(e), "issues": []}) from None
+    # published_diff — что вошло в эту публикацию; diff — чем черновик отличается от опубликованного (после публикации — ничем)
+    return {**bot_publications(pid), "published_version": result["version"], "published_diff": result["diff"]}
+
+
+@app.post("/api/projects/{pid}/bot/publish/{version}/restore")
+def bot_publish_restore(pid: str, version: str):
+    """Вернуть одну из прошлых публикаций (черновик не меняется)."""
+    _bot_project(pid)
+    try:
+        bots.manager.restore(pid, version)
+    except KeyError:
+        raise HTTPException(404, "публикация не найдена") from None
+    except GraphError as e:
+        raise HTTPException(400, {"message": "эта версия больше не собирается", "issues": [i.as_dict() for i in e.issues]})
+    return bot_publications(pid)
 
 
 @app.post("/api/projects/{pid}/bot/emulator")
@@ -1331,7 +1388,7 @@ def _bot_store(pid: str, source: str):
     if source == "emulator":
         engine = bots.manager.emulators.get(pid)
         return engine.store if engine else bots.BotStore(None)
-    return bots.manager.store(pid)
+    return bots.manager.store(pid, test=source == "test")
 
 
 @app.get("/api/projects/{pid}/bot/stats")

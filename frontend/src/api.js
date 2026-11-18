@@ -76,8 +76,11 @@ export const api = {
   // конструктор ботов
   botsCatalog: () => request('GET', '/api/bots/catalog'),
   botStatus: (pid) => request('GET', `/api/projects/${pid}/bot/status`),
-  botStart: (pid) => request('POST', `/api/projects/${pid}/bot/start`),
-  botStop: (pid) => request('POST', `/api/projects/${pid}/bot/stop`),
+  botStart: (pid, test = false) => request('POST', `/api/projects/${pid}/bot/start${test ? '?test=true' : ''}`),
+  botStop: (pid, test = false) => request('POST', `/api/projects/${pid}/bot/stop${test ? '?test=true' : ''}`),
+  botPublications: (pid) => request('GET', `/api/projects/${pid}/bot/publish`),
+  botPublish: (pid, note) => request('POST', `/api/projects/${pid}/bot/publish`, { note }),
+  botRestorePublication: (pid, v) => request('POST', `/api/projects/${pid}/bot/publish/${v}/restore`),
   botEmulator: (pid, body) => request('POST', `/api/projects/${pid}/bot/emulator`, body),
   botEmulatorState: (pid) => request('GET', `/api/projects/${pid}/bot/emulator`),
   botUsers: (pid) => request('GET', `/api/projects/${pid}/bot/users`),

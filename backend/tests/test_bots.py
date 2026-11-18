@@ -155,11 +155,36 @@ def test_live_bot_with_fake_telegram(platform, monkeypatch):
     st = c.get(f"/api/projects/{pid}/bot/status").json()
     assert st["stats"]["in"] >= 4 and st["stats"]["out"] >= 4 and st["log"]
 
-    # сохранение работающего бота подхватывается на лету
+    # «Сохранить» — только черновик: клиенты остаются на опубликованной версии
+    st = c.get(f"/api/projects/{pid}/bot/status").json()
+    assert st["version"] and st["publish"]["meta"]["note"] == "первая публикация" and not st["publish"]["draft_differs"]
+    first = st["version"]
     g["nodes"][11]["data"]["text"] = "Новое эхо: {text}"
     c.put(f"/api/projects/{pid}", json=g)
-    user("что угодно")
-    _wait(lambda: fake.texts(7)[-1] == "Новое эхо: что угодно")
+    st = c.get(f"/api/projects/{pid}/bot/status").json()
+    assert st["publish"]["draft_differs"] and st["publish"]["diff"]["changed"] == ["echo"]
+    user("раз")
+    _wait(lambda: fake.texts(7)[-1] == "Эхо: раз")
+    # публикация — бот сразу на новой версии
+    r = c.post(f"/api/projects/{pid}/bot/publish", json={"note": "новое эхо"}).json()
+    assert r["published_diff"]["changed"] == ["echo"] and r["history"][0]["note"] == "новое эхо" and not r["draft_differs"]
+    user("два")
+    _wait(lambda: fake.texts(7)[-1] == "Новое эхо: два")
+    assert c.post(f"/api/projects/{pid}/bot/publish", json={}).status_code == 409   # нечего публиковать
+    # откат публикации — прежняя версия, черновик не трогается
+    r = c.post(f"/api/projects/{pid}/bot/publish/{first}/restore").json()
+    assert r["version"] == first and r["draft_differs"]
+    user("три")
+    _wait(lambda: fake.texts(7)[-1] == "Эхо: три")
+    assert c.get(f"/api/projects/{pid}").json()["nodes"][11]["data"]["text"] == "Новое эхо: {text}"
+    # черновик с ошибкой опубликовать нельзя
+    bad = {**g, "nodes": g["nodes"] + [node("dup", "bot_command", command="start")]}
+    c.put(f"/api/projects/{pid}", json=bad)
+    r = c.post(f"/api/projects/{pid}/bot/publish", json={})
+    assert r.status_code == 400 and "уже обрабатывается" in r.text
+    user("четыре")
+    _wait(lambda: fake.texts(7)[-1] == "Эхо: четыре")
+    c.put(f"/api/projects/{pid}", json=g)
 
     # токен не может одновременно опрашивать автоматизация
     assert bots.manager.uses_token("42:abc")
@@ -697,3 +722,80 @@ def test_download_stats_export(platform, monkeypatch):
     st = c.post(f"/api/projects/{pid}/bot/emulator", json={"graph": g2, "reset": True,
                                                             "file": {"name": "a.csv", "mime": "text/csv", "size": len(csv_bytes), "data": data_url}}).json()
     assert [m["text"] for m in st["messages"] if m["from"] == "bot"][-1] == f"a.csv {len(csv_bytes)} байт"
+
+
+def test_test_bot_runs_draft(platform, monkeypatch):
+    from app import telegram as tg
+
+    class TwoBots(FakeTelegram):
+        async def handler(self, request):
+            token = request.url.path.split("/")[1][3:]
+            if request.url.path.endswith("/getUpdates"):
+                body = json.loads(request.content or b"{}")
+                offset = body.get("offset") or 0
+                pending = [u for u in self.updates if u["update_id"] >= offset and u.get("_to") == token]
+                if not pending:
+                    import asyncio as _a
+                    await _a.sleep(0.05)
+                return httpx.Response(200, json={"ok": True, "result": pending})
+            if request.url.path.endswith("/sendMessage"):
+                body = json.loads(request.content)
+                self.sent.append({**body, "_from": token})
+                return httpx.Response(200, json={"ok": True, "result": {"message_id": len(self.sent)}})
+            return await super().handler(request)
+
+    fake = TwoBots()
+    monkeypatch.setattr(tg, "TRANSPORT", httpx.MockTransport(fake.handler))
+    c = platform
+    pid = c.post("/api/projects", json={"name": "Т", "kind": "bot"}).json()["id"]
+    g = {"name": "Т", "kind": "bot",
+         "env": [{"key": "BOT_TOKEN", "value": "1:main", "secret": True}, {"key": "TEST_TOKEN", "value": "2:test", "secret": True}],
+         "bot": {"token_env": "BOT_TOKEN", "test_token_env": "TEST_TOKEN"},
+         "nodes": [node("s", "bot_command", command="start"), node("hi", "bot_send", text="v1", links=[], to="current")],
+         "edges": [edge("s", "hi")]}
+    c.put(f"/api/projects/{pid}", json=g)
+    assert c.post(f"/api/projects/{pid}/bot/start").status_code == 200
+    assert c.post(f"/api/projects/{pid}/bot/start?test=true").status_code == 200
+    st = c.get(f"/api/projects/{pid}/bot/status").json()
+    assert st["running"] and st["test"]["running"]
+
+    def say(token, uid, text):
+        fake.next_id += 0
+        fake.push({"_to": token, "message": {"chat": {"id": uid}, "from": {"id": uid, "first_name": "U"}, "text": text}})
+
+    def last(token, uid):
+        got = [m["text"] for m in fake.sent if m["_from"] == token and str(m["chat_id"]) == str(uid)]
+        return got[-1] if got else None
+
+    g["nodes"][1]["data"]["text"] = "v2"
+    c.put(f"/api/projects/{pid}", json=g)                       # сохранили черновик
+    say("1:main", 5, "/start"); say("2:test", 6, "/start")
+    _wait(lambda: last("1:main", 5) == "v1" and last("2:test", 6) == "v2")   # клиенты — v1, тестовый — v2
+    # пользователи тестового бота — отдельно
+    assert [u["id"] for u in c.get(f"/api/projects/{pid}/bot/users").json()] == ["5"]
+    assert c.get(f"/api/projects/{pid}/bot/stats?source=test").json()["users_total"] == 1
+    c.post(f"/api/projects/{pid}/bot/publish", json={"note": "v2"})
+    say("1:main", 5, "/start")
+    _wait(lambda: last("1:main", 5) == "v2")
+    # тот же токен у тестового и основного — ошибка в настройках
+    bad = {**g, "bot": {"token_env": "BOT_TOKEN", "test_token_env": "BOT_TOKEN"}}
+    assert not c.post("/api/validate", json=bad).json()["ok"]
+    c.post(f"/api/projects/{pid}/bot/stop?test=true")
+    c.post(f"/api/projects/{pid}/bot/stop")
+
+
+def test_publish_diff_ignores_reencrypted_secrets(platform):
+    c = platform
+    pid = c.post("/api/projects", json={"name": "Ш", "kind": "bot"}).json()["id"]
+    g = {"name": "Ш", "kind": "bot", "env": [{"key": "BOT_TOKEN", "value": "1:x", "secret": True}],
+         "bot": {"token_env": "BOT_TOKEN"},
+         "nodes": [node("s", "bot_command", command="start"), node("hi", "bot_send", text="a", links=[], to="current")],
+         "edges": [edge("s", "hi")]}
+    c.put(f"/api/projects/{pid}", json=g)
+    c.post(f"/api/projects/{pid}/bot/publish", json={})
+    c.put(f"/api/projects/{pid}", json=g)            # то же значение секрета — новый шифртекст
+    st = c.get(f"/api/projects/{pid}/bot/publish").json()
+    assert not st["draft_differs"] and st["diff"]["settings"] == []
+    g["env"][0]["value"] = "1:other"                 # а смена токена — изменение
+    c.put(f"/api/projects/{pid}", json=g)
+    assert c.get(f"/api/projects/{pid}/bot/publish").json()["diff"]["settings"] == ["env"]

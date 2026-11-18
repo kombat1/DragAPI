@@ -625,6 +625,11 @@ def compile_bot(graph: dict) -> CompiledBot:
             err(None, f"ID администратора «{a}» — это число (узнать свой ID: напишите боту, он появится в «Пользователях»)")
         elif a not in admins:
             admins.append(a)
+    test_env = str(settings.get("test_token_env") or "").strip()
+    if test_env and test_env not in {e.key for e in env}:
+        err(None, f"тестовый бот: в переменных проекта нет {test_env}")
+    elif test_env and test_env == token_env:
+        err(None, "у тестового бота должна быть своя переменная с токеном, не та же, что у основного")
     payments_env = str(settings.get("payments_env") or "").strip()
     if payments_env and payments_env not in {e.key for e in env}:
         err(None, f"оплата: в переменных проекта нет {payments_env}")
@@ -1905,6 +1910,8 @@ class LiveBot:
     error: str | None = None
     started: float = field(default_factory=time.time)
     offset: int = 0
+    test: bool = False          # тестовый бот: работает на черновике
+    version: str | None = None  # опубликованная версия, на которой работает основной бот
 
 
 async def sync_commands(engine: "BotEngine"):
@@ -1993,6 +2000,104 @@ def _user(u: dict) -> dict:
             "username": u.get("username") or ""}
 
 
+# ---------- черновик и публикации ----------
+
+GRAPH_KEYS = ("nodes", "edges", "env", "bot", "sandbox", "libraries", "firewall")
+
+
+def _canon(project: dict) -> dict:
+    """Только то, что влияет на поведение бота: без координат, выделения и т.п."""
+    nodes = sorted(({"id": n.get("id"), "type": n.get("type"),
+                     "data": {k: v for k, v in (n.get("data") or {}).items() if k not in ("collapsed",)}}
+                    for n in project.get("nodes") or []), key=lambda n: str(n["id"]))
+    edges = sorted(({"s": e.get("source"), "t": e.get("target"), "h": e.get("sourceHandle")}
+                    for e in project.get("edges") or []), key=lambda e: (str(e["s"]), str(e["h"]), str(e["t"])))
+    env = sorted(({"key": e.get("key"), "secret": bool(e.get("secret")), "value": _env_value(e)}
+                  for e in project.get("env") or []), key=lambda e: str(e["key"]))
+    return {"nodes": nodes, "edges": edges, "env": env,
+            **{k: project.get(k) or {} for k in ("bot", "sandbox", "libraries", "firewall")}}
+
+
+def _env_value(e: dict) -> str:
+    """Секрет шифруется заново при каждом сохранении (шифртекст всегда разный) — сравниваем хеш значения."""
+    import hashlib
+    value = e.get("value") or ""
+    if e.get("secret") and e.get("value_enc") and not value:
+        try:
+            value = vault.decrypt(e["value_enc"])
+        except vault.VaultError:
+            value = e["value_enc"]
+    return hashlib.sha256(str(value).encode()).hexdigest()[:16] if e.get("secret") else str(value)
+
+
+def fingerprint(project: dict) -> str:
+    import hashlib
+    return hashlib.sha256(json.dumps(_canon(project), ensure_ascii=False, sort_keys=True).encode()).hexdigest()[:16]
+
+
+def diff_summary(old: dict | None, new: dict) -> dict:
+    """Что изменится при публикации: блоки добавлены / удалены / изменены, связи, настройки."""
+    a, b = _canon(old or {}), _canon(new)
+    an, bn = {n["id"]: n for n in a["nodes"]}, {n["id"]: n for n in b["nodes"]}
+    changed = [i for i in an.keys() & bn.keys() if an[i] != bn[i]]
+    ae = {json.dumps(e, sort_keys=True) for e in a["edges"]}
+    be = {json.dumps(e, sort_keys=True) for e in b["edges"]}
+    settings = [k for k in ("env", "bot", "sandbox", "libraries", "firewall") if a[k] != b[k]]
+    return {"added": sorted(bn.keys() - an.keys()), "removed": sorted(an.keys() - bn.keys()), "changed": sorted(changed),
+            "edges": len(ae ^ be), "settings": settings,
+            "same": not (bn.keys() ^ an.keys()) and not changed and ae == be and not settings}
+
+
+class Publications:
+    """data/bots/<проект>/published/<версия>.json — снимки проекта; current.json — какая версия опубликована."""
+
+    def __init__(self, pid: str):
+        self.dir = BOTS_DIR / pid / "published"
+
+    def history(self) -> list[dict]:
+        out = []
+        for f in sorted(self.dir.glob("*.json"), reverse=True):
+            if f.name == "current.json":
+                continue
+            try:
+                meta = json.loads(f.read_text("utf-8"))["meta"]
+            except (OSError, ValueError, KeyError):
+                continue
+            out.append({**meta, "version": f.stem})
+        return out
+
+    def current(self) -> str | None:
+        try:
+            return json.loads((self.dir / "current.json").read_text("utf-8"))["version"]
+        except (OSError, ValueError, KeyError):
+            return None
+
+    def load(self, version: str) -> dict:
+        if not re.fullmatch(r"\d{10,20}", version or ""):
+            raise KeyError(version)
+        try:
+            return json.loads((self.dir / f"{version}.json").read_text("utf-8"))["project"]
+        except (OSError, ValueError, KeyError):
+            raise KeyError(version) from None
+
+    def publish(self, project: dict, note: str, by: str | None, diff: dict) -> str:
+        self.dir.mkdir(parents=True, exist_ok=True)
+        version = str(int(time.time() * 1000))
+        snapshot = {k: project.get(k) for k in ("name", "kind", *GRAPH_KEYS)}
+        meta = {"t": time.time(), "note": note[:500], "by": by, "fingerprint": fingerprint(project),
+                "blocks": len(project.get("nodes") or []),
+                "diff": {k: (len(v) if isinstance(v, list) and k != "settings" else v) for k, v in diff.items()}}
+        (self.dir / f"{version}.json").write_text(json.dumps({"meta": meta, "project": snapshot}, ensure_ascii=False), "utf-8")
+        self.set_current(version)
+        for old in [f for f in sorted(self.dir.glob("*.json")) if f.name != "current.json"][:-50]:
+            old.unlink()     # храним 50 последних публикаций
+        return version
+
+    def set_current(self, version: str):
+        self.load(version)
+        (self.dir / "current.json").write_text(json.dumps({"version": version}), "utf-8")
+
+
 class BotManager:
     def __init__(self):
         self.live: dict[str, LiveBot] = {}
@@ -2008,9 +2113,13 @@ class BotManager:
         BOTS_DIR.mkdir(parents=True, exist_ok=True)
         self.state_path().write_text(json.dumps(sorted(self.live)), "utf-8")
 
-    def store(self, pid: str) -> BotStore:
-        live = self.live.get(pid)
-        return live.engine.store if live else BotStore(BOTS_DIR / f"{pid}.json")
+    @staticmethod
+    def key(pid: str, test: bool = False) -> str:
+        return f"{pid}:test" if test else pid
+
+    def store(self, pid: str, test: bool = False) -> BotStore:
+        live = self.live.get(self.key(pid, test))
+        return live.engine.store if live else BotStore(BOTS_DIR / f"{pid}{'.test' if test else ''}.json")
 
     def uses_token(self, token: str) -> bool:
         return any(b.token == token for b in self.live.values())
@@ -2020,26 +2129,91 @@ class BotManager:
         project = project or storage.load(pid)
         return compile_bot({**project, "env": vault.unseal_env(project.get("env"), project.get("env"))})
 
-    async def start(self, pid: str) -> LiveBot:
+    def published(self, pid: str) -> tuple[str | None, dict | None]:
+        pubs = Publications(pid)
+        version = pubs.current()
+        if version is None:
+            return None, None
+        try:
+            return version, pubs.load(version)
+        except KeyError:
+            return None, None
+
+    def publish(self, pid: str, note: str = "", by: str | None = None) -> dict:
+        """Опубликовать сохранённый черновик: проверка графа, снимок, работающий бот переходит на него."""
+        project = storage.load(pid)
+        self.compiled_for(pid, project)              # с ошибками не публикуем (GraphError)
+        _, old = self.published(pid)
+        diff = diff_summary(old, project)
+        if old is not None and diff["same"]:
+            raise ValueError("черновик не отличается от опубликованной версии")
+        version = Publications(pid).publish(project, note, by, diff)
+        self._apply(pid, version)
+        return {"version": version, "diff": diff}
+
+    def restore(self, pid: str, version: str) -> dict:
+        pubs = Publications(pid)
+        project = pubs.load(version)
+        self.compiled_for(pid, project)
+        pubs.set_current(version)
+        self._apply(pid, version)
+        return {"version": version}
+
+    def _apply(self, pid: str, version: str):
+        """Работающий основной бот переходит на опубликованную версию (идущие диалоги доживают по старой)."""
+        bot = self.live.get(pid)
+        if bot is None:
+            return
+        compiled = self.compiled_for(pid, Publications(pid).load(version))
+        if compiled.token != bot.token:
+            bot.error = "в опубликованной версии другой токен — перезапустите бота"
+            return
+        bot.engine.compiled = compiled
+        bot.version = version
+        bot.error = None
+        if self.loop:
+            asyncio.run_coroutine_threadsafe(self._commands(bot), self.loop) if not _running_in(self.loop) \
+                else asyncio.ensure_future(self._commands(bot))
+
+    async def start(self, pid: str, test: bool = False) -> LiveBot:
+        """Основной бот — на опубликованной версии (если её нет — публикуется сохранённый черновик);
+        тестовый — на черновике со своим токеном (настройки → Бот → тестовый бот)."""
         from .telegram import TelegramError, call
-        compiled = self.compiled_for(pid)
-        token = compiled.token
-        if not token:
-            raise ValueError("не задан токен бота: «Настройки проекта → Бот»")
-        other = next((b for b in self.live.values() if b.token == token and b.pid != pid), None)
+        version = None
+        if test:
+            project = storage.load(pid)
+            compiled = self.compiled_for(pid, project)
+            env_key = str((project.get("bot") or {}).get("test_token_env") or "")
+            token = compiled.env_values.get(env_key, "") if env_key else ""
+            if not token:
+                raise ValueError("не задан токен тестового бота: «Настройки проекта → Бот → Тестовый бот»")
+            if token == compiled.token:
+                raise ValueError("у тестового бота должен быть свой токен — не такой, как у основного")
+        else:
+            version, project = self.published(pid)
+            if project is None:          # первый запуск: публикуем сохранённую версию
+                version = self.publish(pid, "первая публикация")["version"]
+                project = Publications(pid).load(version)
+            compiled = self.compiled_for(pid, project)
+            token = compiled.token
+            if not token:
+                raise ValueError("не задан токен бота: «Настройки проекта → Бот» (и опубликуйте изменения)")
+        key = self.key(pid, test)
+        other = next((b for k, b in self.live.items() if b.token == token and k != key), None)
         if other:
-            raise ValueError(f"этот токен уже использует бот проекта {other.pid}")
+            raise ValueError(f"этот токен уже использует {'тестовый ' if other.test else ''}бот проекта {other.pid}")
         if self.hub and token in self.hub.telegram.pollers:
             raise ValueError("этот токен уже используется в настройках Telegram проекта-автоматизации")
         try:
             me = await call(token, "getMe")
         except TelegramError as e:
             raise ValueError(f"Telegram: {e}") from None
-        await self.stop(pid, persist=False)
-        engine = BotEngine(pid, compiled, TelegramTransport(token), BotStore(BOTS_DIR / f"{pid}.json"), self.hub)
-        engine.files_dir = BOTS_DIR / pid / "files"
-        bot = LiveBot(pid, engine, token, me.get("username") or "")
-        self.live[pid] = bot
+        await self.stop(pid, persist=False, test=test)
+        engine = BotEngine(pid, compiled, TelegramTransport(token),
+                           BotStore(BOTS_DIR / f"{pid}{'.test' if test else ''}.json"), self.hub)
+        engine.files_dir = BOTS_DIR / pid / ("test-files" if test else "files")
+        bot = LiveBot(pid, engine, token, me.get("username") or "", test=test, version=version)
+        self.live[key] = bot
         bot.task = asyncio.ensure_future(self._poll(bot))
         self._persist()
         asyncio.ensure_future(self._commands(bot))
@@ -2048,8 +2222,8 @@ class BotManager:
     async def _commands(self, bot: LiveBot):
         await sync_commands(bot.engine)
 
-    async def stop(self, pid: str, persist: bool = True):
-        bot = self.live.pop(pid, None)
+    async def stop(self, pid: str, persist: bool = True, test: bool = False):
+        bot = self.live.pop(self.key(pid, test), None)
         if bot:
             if bot.task:
                 bot.task.cancel()
@@ -2058,8 +2232,9 @@ class BotManager:
             self._persist()
 
     def reload(self, pid: str, project: dict):
-        """Проект сохранили: работающий бот подхватывает новую версию (идущие диалоги доживают по старой)."""
-        bot = self.live.get(pid)
+        """Проект сохранили: тестовый бот (он на черновике) подхватывает новую версию.
+        Основной бот не меняется — для него нужна публикация."""
+        bot = self.live.get(self.key(pid, True))
         if bot is None:
             return None
         try:
@@ -2067,8 +2242,9 @@ class BotManager:
         except (GraphError, vault.VaultError) as e:
             bot.error = f"новая версия не применена: {e}"
             return bot.error
-        if compiled.token != bot.token:
-            bot.error = "токен изменился — перезапустите бота"
+        env_key = str((project.get("bot") or {}).get("test_token_env") or "")
+        if compiled.env_values.get(env_key, "") != bot.token:
+            bot.error = "токен тестового бота изменился — перезапустите его"
             return bot.error
         bot.engine.compiled = compiled
         bot.error = None
@@ -2104,23 +2280,24 @@ class BotManager:
             if not updates and time.monotonic() - began < 0.5:
                 await asyncio.sleep(1)
 
-    def status(self, pid: str) -> dict:
-        bot = self.live.get(pid)
+    def status(self, pid: str, test: bool = False) -> dict:
+        bot = self.live.get(self.key(pid, test))
         if bot is None:
             return {"running": False}
         return {"running": True, "username": bot.username, "error": bot.error, "started": bot.started,
-                "stats": bot.engine.stats, "dialogs": len(bot.engine.waiters)}
+                "stats": bot.engine.stats, "dialogs": len(bot.engine.waiters), "version": bot.version}
 
     async def autostart(self):
         try:
             pids = json.loads(self.state_path().read_text("utf-8"))
         except (OSError, ValueError):
             return
-        for pid in pids:
+        for key in pids:
+            pid, _, test = key.partition(":")
             try:
-                await self.start(pid)
+                await self.start(pid, test=bool(test))
             except Exception as e:  # noqa: BLE001
-                print(f"DragAPI: бот проекта {pid} не запущен: {e}")
+                print(f"DragAPI: {'тестовый ' if test else ''}бот проекта {pid} не запущен: {e}")
         self._persist()
 
     async def scheduler(self):
@@ -2158,6 +2335,13 @@ class BotManager:
             self.emulators[pid] = eng
         eng.compiled = compiled
         return eng
+
+
+def _running_in(loop) -> bool:
+    try:
+        return asyncio.get_running_loop() is loop
+    except RuntimeError:
+        return False
 
 
 EMU_CHAT = "1"

@@ -351,7 +351,8 @@ export function BotStats({ projectId, graph, onCounts }) {
     <div className="bot-stats">
       <div className="stats-tools">
         <select value={source} onChange={(e) => setSource(e.target.value)}>
-          <option value="live">Работающий бот</option>
+          <option value="live">Бот для клиентов</option>
+          <option value="test">Тестовый бот</option>
           <option value="emulator">Тест-чат</option>
         </select>
         <label className="check">
@@ -494,16 +495,24 @@ export function BotLog({ projectId, onSelectNode }) {
     }
   }, [projectId])
   if (!st) return null
-  if (!st.running) return <div className="muted pad">Бот не запущен. Нажмите «▶ Запустить бота» — здесь появятся входящие и исходящие сообщения.</div>
+  if (!st.running && !st.test?.running)
+    return <div className="muted pad">Бот не запущен. Нажмите «▶ Запустить бота» — здесь появятся входящие и исходящие сообщения.</div>
   return (
     <div className="bot-log">
       <div className="muted">
-        @{st.username} · входящих {st.stats.in}, ответов {st.stats.out}, ошибок {st.stats.errors} · незаконченных диалогов{' '}
-        {st.dialogs}
+        {st.running ? (
+          <>
+            @{st.username} · входящих {st.stats.in}, ответов {st.stats.out}, ошибок {st.stats.errors} · незаконченных диалогов {st.dialogs}
+          </>
+        ) : (
+          'основной бот остановлен'
+        )}
+        {st.test?.running && ` · 🧪 @${st.test.username}: входящих ${st.test.stats.in}`}
       </div>
       {st.log.map((e, i) => (
         <div key={i} className={`run-event ${e.kind === 'error' ? 'bad' : e.kind === 'in' ? 'log' : ''}`} onClick={() => e.node && onSelectNode(e.node)}>
-          <span className="muted">{fmtTime(e.t)}</span> {e.kind === 'in' ? '→' : e.kind === 'out' ? '←' : '✖'}{' '}
+          <span className="muted">{fmtTime(e.t)}</span> {e.test ? '🧪 ' : ''}
+          {e.kind === 'in' ? '→' : e.kind === 'out' ? '←' : '✖'}{' '}
           {e.user && <b>{e.user}: </b>}
           {e.text} <span className="muted">· чат {e.chat}</span>
         </div>
@@ -676,6 +685,49 @@ export function BotTab({ bot, setBot, env, setEnv }) {
             value={tokenVar.value || ''}
             placeholder={tokenVar.has_value ? '•••••• задан — введите новый, чтобы заменить' : '123456789:AA…'}
             onChange={(e) => setEnv(env.map((x) => (x.key === b.token_env ? { ...x, value: e.target.value, secret: true } : x)))}
+          />
+        </label>
+      )}
+      <h4 className="settings-h">Тестовый бот</h4>
+      <p className="hint">
+        Второй бот (создайте его у @BotFather, например <code>my_shop_test_bot</code>) работает на <b>черновике</b> и
+        подхватывает каждое «Сохранить» — проверяйте изменения в настоящем Telegram, пока клиенты пользуются опубликованной
+        версией. У тестового бота свои пользователи и статистика.
+      </p>
+      <div className="list-row">
+        <label className="field">
+          <span className="field-label">Токен тестового бота — секретная переменная</span>
+          <select value={b.test_token_env || ''} onChange={(e) => setBot({ ...b, test_token_env: e.target.value })}>
+            <option value="">— без тестового бота —</option>
+            {envKeys.filter((k) => k !== b.token_env).map((k) => (
+              <option key={k} value={k}>
+                {k}
+              </option>
+            ))}
+          </select>
+        </label>
+        {!envKeys.includes('TEST_BOT_TOKEN') && (
+          <button
+            className="small"
+            onClick={() => {
+              setEnv([...env, { key: 'TEST_BOT_TOKEN', value: '', secret: true }])
+              setBot({ ...b, test_token_env: 'TEST_BOT_TOKEN' })
+            }}
+          >
+            + переменная TEST_BOT_TOKEN
+          </button>
+        )}
+      </div>
+      {b.test_token_env && env.find((e) => e.key === b.test_token_env) && (
+        <label className="field">
+          <span className="field-label">Токен тестового бота (хранится зашифрованным)</span>
+          <input
+            type="password"
+            className="mono"
+            autoComplete="off"
+            value={env.find((e) => e.key === b.test_token_env).value || ''}
+            placeholder={env.find((e) => e.key === b.test_token_env).has_value ? '•••••• задан — введите новый, чтобы заменить' : '123456789:AA…'}
+            onChange={(e) => setEnv(env.map((x) => (x.key === b.test_token_env ? { ...x, value: e.target.value, secret: true } : x)))}
           />
         </label>
       )}
@@ -853,6 +905,143 @@ export function BotPayments({ projectId }) {
           ))}
         </tbody>
       </table>
+    </div>
+  )
+}
+
+// ---------- публикация: черновик → бот для клиентов ----------
+
+const BLOCK_TITLE = (nodes, id) => {
+  const n = (nodes || []).find((x) => x.id === id)
+  return n ? `${id}` : id
+}
+
+export function PublishModal({ projectId, dirty, onSave, catalog, nodes, onClose, onChanged }) {
+  const [info, setInfo] = useState(null)
+  const [note, setNote] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState(null)
+  const [done, setDone] = useState(null)
+  const load = () => api.botPublications(projectId).then(setInfo).catch((e) => setError(e.message))
+  useEffect(() => {
+    // публикуется сохранённый черновик — несохранённое сначала сохраняем
+    ;(dirty ? onSave() : Promise.resolve()).then(load).catch((e) => setError(e.message))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+  useEffect(() => {
+    const h = (e) => e.key === 'Escape' && !busy && onClose()
+    window.addEventListener('keydown', h)
+    return () => window.removeEventListener('keydown', h)
+  }, [onClose, busy])
+
+  const title = (id) => {
+    const n = (nodes || []).find((x) => x.id === id)
+    const spec = n && catalog?.blocks[n.type]
+    return spec ? `${spec.icon || ''} ${spec.title} · ${id}` : BLOCK_TITLE(nodes, id)
+  }
+  const publish = async () => {
+    setBusy(true)
+    setError(null)
+    try {
+      const r = await api.botPublish(projectId, note)
+      setInfo(r)
+      setDone(r.published_version)
+      setNote('')
+      onChanged?.()
+    } catch (e) {
+      setError(e.data?.detail?.issues?.length ? `${e.message}: ${e.data.detail.issues.map((i) => i.message).join('; ')}` : e.message)
+    } finally {
+      setBusy(false)
+    }
+  }
+  const restore = async (h) => {
+    if (!confirm(`Вернуть клиентам версию от ${new Date(h.t * 1000).toLocaleString()}${h.note ? ` («${h.note}»)` : ''}? Черновик не изменится.`)) return
+    setBusy(true)
+    try {
+      setInfo(await api.botRestorePublication(projectId, h.version))
+      setDone(null)
+      onChanged?.()
+    } catch (e) {
+      setError(e.message)
+    } finally {
+      setBusy(false)
+    }
+  }
+  const d = info?.diff
+  const settingsNames = { env: 'переменные', bot: 'настройки бота', sandbox: 'песочница', libraries: 'библиотеки', firewall: 'firewall' }
+  return (
+    <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && !busy && onClose()}>
+      <div className="modal publish-modal" role="dialog" aria-label="Публикация бота">
+        <div className="modal-head">
+          <div>
+            <div className="inspector-title">🚀 Публикация</div>
+            <div className="muted">
+              «Сохранить» меняет только черновик. Клиенты видят опубликованную версию — она меняется здесь.
+            </div>
+          </div>
+          <button className="icon" onClick={onClose} disabled={busy} title="Закрыть (Esc)">
+            ×
+          </button>
+        </div>
+        {!info ? (
+          <div className="muted pad">{error || 'Загрузка…'}</div>
+        ) : (
+          <>
+            {done && <div className="issue ok-box">✓ Опубликовано. Работающий бот уже отвечает клиентам по новой версии.</div>}
+            {info.draft_differs ? (
+              <div className="field">
+                <div className="field-label">{info.version ? 'Что изменится для клиентов' : 'Первая публикация'}</div>
+                {info.version && d && (
+                  <div className="diff-list">
+                    {d.added.map((id) => (
+                      <div key={id} className="diff-add">+ {title(id)}</div>
+                    ))}
+                    {d.changed.map((id) => (
+                      <div key={id} className="diff-change">~ {title(id)}</div>
+                    ))}
+                    {d.removed.map((id) => (
+                      <div key={id} className="diff-del">− {id}</div>
+                    ))}
+                    {d.edges > 0 && <div className="muted">связей изменено: {d.edges}</div>}
+                    {d.settings.length > 0 && <div className="muted">настройки: {d.settings.map((k) => settingsNames[k] || k).join(', ')}</div>}
+                  </div>
+                )}
+                <input placeholder="Что изменилось (необязательно) — увидите в истории" value={note} onChange={(e) => setNote(e.target.value)} />
+                <div className="tester-actions">
+                  <button className="primary" onClick={publish} disabled={busy}>
+                    {busy ? 'Публикую…' : '🚀 Опубликовать'}
+                  </button>
+                  <span className="muted">Черновик с ошибками опубликовать нельзя. Незаконченные диалоги доживут по старой версии.</span>
+                </div>
+              </div>
+            ) : (
+              <div className="issue">Черновик совпадает с опубликованной версией — публиковать нечего.</div>
+            )}
+            {error && <div className="issue error">{error}</div>}
+            <div className="field-label">История публикаций</div>
+            <div className="publish-history">
+              {(info.history || []).length === 0 && <div className="muted">Публикаций ещё не было.</div>}
+              {(info.history || []).map((h) => (
+                <div key={h.version} className={`log-row ${h.version === info.version ? 'open' : ''}`}>
+                  <span>{new Date(h.t * 1000).toLocaleString()}</span>
+                  <span className="publish-note">{h.note || <span className="muted">без заметки</span>}</span>
+                  <span className="muted">
+                    {h.diff ? `+${h.diff.added || 0} ~${h.diff.changed || 0} −${h.diff.removed || 0}` : ''} · блоков {h.blocks}
+                    {h.by ? ` · ${h.by}` : ''}
+                  </span>
+                  {h.version === info.version ? (
+                    <span className="lib-state good">у клиентов</span>
+                  ) : (
+                    <button className="small" disabled={busy} onClick={() => restore(h)} title="Вернуть клиентам эту версию">
+                      ↩ Вернуть
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+      </div>
     </div>
   )
 }

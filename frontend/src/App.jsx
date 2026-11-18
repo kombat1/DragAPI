@@ -23,6 +23,7 @@ import DeployModal from './components/DeployModal.jsx'
 import { DEFAULT_FIREWALL, normalizeFirewall } from './components/FirewallTab.jsx'
 import { newId } from './components/ProjectSettings.jsx'
 import { AgentsModal, RecordModal } from './components/Automation.jsx'
+import { PublishModal } from './components/Bots.jsx'
 
 
 const BRANCH_LABELS = {
@@ -245,6 +246,7 @@ function Editor({ catalogs, projectId, onProjectsChanged, me }) {
   const [bot, setBot] = useState({})
   const [botState, setBotState] = useState(null) // {running, username, error}
   const [nodeCounts, setNodeCounts] = useState(null) // воронка: {node: сколько раз дошли}
+  const [publishOpen, setPublishOpen] = useState(false)
   const [automation, setAutomation] = useState({})
   const [telegram, setTelegram] = useState({})
   const [agentsOpen, setAgentsOpen] = useState(false)
@@ -360,7 +362,8 @@ function Editor({ catalogs, projectId, onProjectsChanged, me }) {
     try {
       const saved = await api.save(projectId, graph)
       if (saved?.automation) setAutomation(saved.automation)
-      if (saved?.bot_reload_error) notify(`Бот работает на прежней версии: ${saved.bot_reload_error}`, 'error')
+      if (saved?.bot_reload_error) notify(`Тестовый бот работает на прежней версии: ${saved.bot_reload_error}`, 'error')
+      if (saved?.kind === 'bot') api.botStatus(projectId).then(setBotState).catch(() => {})
       setDirty(false)
       onProjectsChanged()
     } catch (e) {
@@ -429,17 +432,19 @@ function Editor({ catalogs, projectId, onProjectsChanged, me }) {
       clearInterval(t)
     }
   }, [isBot, projectId])
-  const botStart = async () => {
+  const botStart = async (test = false) => {
     try {
       await save()
-      setBotState(await api.botStart(projectId))
-      notify('Бот запущен', 'ok')
+      setBotState(await api.botStart(projectId, test))
+      notify(test ? 'Тестовый бот запущен — он работает на черновике' : 'Бот запущен на опубликованной версии', 'ok')
     } catch (e) {
       if (e.data?.detail?.issues?.length) setValidation({ ok: false, issues: e.data.detail.issues })
       notify(`Бот не запущен: ${e.message}`, 'error')
     }
   }
-  const botStop = async () => setBotState(await api.botStop(projectId))
+  const botStop = async (test = false) => setBotState(await api.botStop(projectId, test))
+  const pub = botState?.publish
+  const unpublished = isBot && (dirty || pub?.draft_differs)
 
   const onNodesChange = useCallback((changes) => {
     setNodes((ns) => applyNodeChanges(changes, ns))
@@ -835,17 +840,45 @@ function Editor({ catalogs, projectId, onProjectsChanged, me }) {
         </button>
         {isBot ? (
           <>
+            <span
+              className={`publish-badge ${unpublished ? 'warn' : 'ok'}`}
+              title={
+                pub?.meta
+                  ? `Опубликовано ${new Date(pub.meta.t * 1000).toLocaleString()}${pub.meta.note ? ` — ${pub.meta.note}` : ''}`
+                  : 'Бот ещё не публиковался'
+              }
+            >
+              {!pub?.version ? '○ не опубликован' : unpublished ? '● есть неопубликованные изменения' : '✓ опубликовано'}
+            </span>
+            <button onClick={() => setPublishOpen(true)} disabled={readOnly || errors > 0} title="Выкатить черновик клиентам или вернуть прошлую версию">
+              🚀 Опубликовать
+            </button>
+            {bot.test_token_env &&
+              (botState?.test?.running ? (
+                <>
+                  <a className="button" href={`https://t.me/${botState.test.username}`} target="_blank" rel="noreferrer" title={botState.test.error || 'Тестовый бот — работает на черновике'}>
+                    🧪 @{botState.test.username} ↗
+                  </a>
+                  <button onClick={() => botStop(true)} disabled={readOnly} title="Остановить тестового бота">
+                    ■ 🧪
+                  </button>
+                </>
+              ) : (
+                <button onClick={() => botStart(true)} disabled={readOnly || errors > 0} title="Запустить тестового бота на черновике (свой токен)">
+                  🧪 Тестовый бот
+                </button>
+              ))}
             {botState?.running && botState.username && (
               <a className="button" href={`https://t.me/${botState.username}`} target="_blank" rel="noreferrer" title={botState.error || 'Открыть бота в Telegram'}>
                 {botState.error ? '⚠' : '🟢'} @{botState.username} ↗
               </a>
             )}
             {botState?.running ? (
-              <button onClick={botStop} disabled={readOnly}>
+              <button onClick={() => botStop(false)} disabled={readOnly}>
                 ■ Остановить бота
               </button>
             ) : (
-              <button className="primary" onClick={botStart} disabled={errors > 0 || readOnly} title="Сохранить и запустить бота в Telegram">
+              <button className="primary" onClick={() => botStart(false)} disabled={errors > 0 || readOnly} title="Запустить бота для клиентов — на опубликованной версии (если её нет — опубликуется текущая)">
                 ▶ Запустить бота
               </button>
             )}
@@ -995,6 +1028,17 @@ function Editor({ catalogs, projectId, onProjectsChanged, me }) {
       )}
       {membersOpen && <MembersModal projectId={projectId} me={me} onClose={() => setMembersOpen(false)} />}
       {agentsOpen && <AgentsModal me={me} onClose={() => setAgentsOpen(false)} />}
+      {publishOpen && (
+        <PublishModal
+          projectId={projectId}
+          dirty={dirty}
+          onSave={save}
+          catalog={catalog}
+          nodes={nodes}
+          onClose={() => setPublishOpen(false)}
+          onChanged={() => api.botStatus(projectId).then(setBotState).catch(() => {})}
+        />
+      )}
       {recordOpen && (
         <RecordModal projectId={projectId} agentId={automation.agent} onInsert={insertChain} onClose={() => setRecordOpen(false)} />
       )}

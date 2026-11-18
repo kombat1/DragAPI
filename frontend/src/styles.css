@@ -566,3 +566,15 @@ kbd { font-family: var(--mono); font-size: 11px; padding: 0 4px; border: 1px sol
 @media (max-width: 900px) {
   .stats-grid { grid-template-columns: 1fr; }
 }
+
+/* ---------- публикация ---------- */
+.publish-badge { font-size: 12px; padding: 3px 10px; border-radius: 12px; white-space: nowrap; }
+.publish-badge.ok { color: var(--ok); background: color-mix(in srgb, var(--ok) 12%, transparent); }
+.publish-badge.warn { color: var(--warn); background: color-mix(in srgb, var(--warn) 14%, transparent); }
+.publish-modal { width: min(760px, calc(100vw - 32px)); }
+.diff-list { display: flex; flex-direction: column; gap: 2px; margin: 4px 0 8px; font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 12px; max-height: 200px; overflow: auto; }
+.diff-add { color: var(--ok); } .diff-change { color: var(--warn); } .diff-del { color: var(--danger); }
+.publish-history { display: flex; flex-direction: column; gap: 2px; max-height: 260px; overflow: auto; }
+.publish-history .log-row { flex-wrap: wrap; cursor: default; }
+.publish-note { flex: 1; min-width: 120px; }
+.ok-box { color: var(--ok); }
