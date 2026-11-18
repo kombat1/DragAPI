@@ -4,6 +4,7 @@ import { useCatalog } from '../catalog.js'
 import FirewallTab from './FirewallTab.jsx'
 import ListEditor from './ListEditor.jsx'
 import { AutomationTab, TelegramTab } from './Automation.jsx'
+import { BotTab } from './Bots.jsx'
 
 export const SETTINGS_TABS = [
   ['models', 'Модели данных'],
@@ -444,7 +445,9 @@ function LibrariesTab({ projectId, libraries, setLibraries, sandbox, onInstalled
 export default function ProjectSettings({ projectId, project, setProject, issues, sandboxInfo, onClose, onInstalled, initialTab, readOnly = false, kind = 'api' }) {
   const tabs = kind === 'automation'
     ? [['automation', 'Сценарий'], ['telegram', 'Telegram'], ...SETTINGS_TABS.filter(([k]) => k !== 'models')]
-    : SETTINGS_TABS
+    : kind === 'bot'
+      ? [['bot', 'Бот'], ...SETTINGS_TABS.filter(([k]) => k !== 'models')]
+      : SETTINGS_TABS
   const [tab, setTab] = useState(tabs.some(([k]) => k === initialTab) ? initialTab : tabs[0][0])
 
   useEffect(() => {
@@ -496,6 +499,9 @@ export default function ProjectSettings({ projectId, project, setProject, issues
               automation={project.automation}
               setAutomation={(automation) => setProject({ automation })}
             />
+          )}
+          {tab === 'bot' && (
+            <BotTab bot={project.bot} setBot={(bot) => setProject({ bot })} env={project.env} setEnv={(env) => setProject({ env })} />
           )}
           {tab === 'telegram' && (
             <TelegramTab

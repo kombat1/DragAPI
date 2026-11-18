@@ -3,6 +3,7 @@ import TestsPanel from './TestsPanel.jsx'
 import { api } from '../api.js'
 import { NetworkEvents } from './Inspector.jsx'
 import { RunsPanel } from './Automation.jsx'
+import { BotLog, BotUsers, EmulatorPanel } from './Bots.jsx'
 
 const fmtTime = (t) => new Date(t * 1000).toLocaleTimeString()
 
@@ -228,7 +229,7 @@ function loadHeight() {
 
 export default function BottomPanel({
   projectId, running, issues, onSelectNode, onHighlight, onRestored, models,
-  tab, setTab, testsProps, runsProps,
+  tab, setTab, testsProps, runsProps, botProps,
 }) {
   const [collapsed, setCollapsed] = useState(false)
   const [height, setHeight] = useState(loadHeight)
@@ -263,7 +264,15 @@ export default function BottomPanel({
     <section className={`bottom-panel ${collapsed ? 'collapsed' : ''}`} style={collapsed ? undefined : { height }}>
       {!collapsed && <div className="resize-handle" onPointerDown={startResize} title="Потяните, чтобы изменить высоту" />}
       <div className="tabs">
-        {(runsProps
+        {(botProps
+          ? [
+              ['emulator', 'Тест-чат'],
+              ['botlog', `Журнал${botProps.running ? ' ●' : ''}`],
+              ['users', 'Пользователи'],
+              ['issues', `Проблемы${issues.length ? ` (${issues.length})` : ''}`],
+              ['versions', 'История версий'],
+            ]
+          : runsProps
           ? [
               ['runs', 'Запуски'],
               ['issues', `Проблемы${issues.length ? ` (${issues.length})` : ''}`],
@@ -292,7 +301,14 @@ export default function BottomPanel({
       </div>
       {!collapsed && (
         <div className="tab-body">
-          {tab === 'tests' && !runsProps && <TestsPanel projectId={projectId} {...testsProps} />}
+          {tab === 'tests' && !runsProps && !botProps && <TestsPanel projectId={projectId} {...testsProps} />}
+          {botProps && (
+            <div style={{ display: tab === 'emulator' ? undefined : 'none', height: '100%' }}>
+              <EmulatorPanel projectId={projectId} onSelectNode={onSelectNode} {...botProps} />
+            </div>
+          )}
+          {botProps && tab === 'botlog' && <BotLog projectId={projectId} onSelectNode={onSelectNode} />}
+          {botProps && tab === 'users' && <BotUsers projectId={projectId} readOnly={botProps.readOnly} />}
           {runsProps && (
             <div style={{ display: tab === 'runs' ? undefined : 'none', height: '100%' }}>
               <RunsPanel projectId={projectId} onSelectNode={onSelectNode} {...runsProps} />

@@ -304,6 +304,26 @@ export default function Inspector({ node, onChange, onDelete, issues, availableF
       </div>
     )
   }
+  if (!node && catalog.bot) {
+    return (
+      <div className="inspector empty">
+        <p>Выберите блок, чтобы настроить его.</p>
+        <p className="muted">
+          Каждое <b>событие</b> («Команда» или «Сообщение») начинает свою ветку — что бот делает в ответ, например
+          <br />
+          <b>/start → Отправить сообщение → Меню с кнопками</b>
+        </p>
+        <p className="muted">
+          У «Меню» столько выходов, сколько кнопок, — подключите к каждому свою ветку. «Спросить» ждёт ответа текстом и
+          кладёт его в переменную; «Запомнить» сохраняет данные пользователя навсегда (<code>saved['ключ']</code>).
+        </p>
+        <p className="muted">
+          Проверяйте бота во вкладке <b>«Тест-чат»</b> внизу — без Telegram и токена. Для запуска в Telegram задайте токен в
+          «Настройки проекта → Бот».
+        </p>
+      </div>
+    )
+  }
   if (!node && catalog.automation) {
     return (
       <div className="inspector empty">

@@ -73,6 +73,15 @@ export const api = {
   deployStop: (pid, removeData) => request('DELETE', `/api/projects/${pid}/deploy?remove_data=${removeData ? 'true' : 'false'}`),
   deployLogs: (pid) => request('GET', `/api/projects/${pid}/deploy/logs`),
   exportUrl: (id) => `/api/projects/${id}/export`,
+  // конструктор ботов
+  botsCatalog: () => request('GET', '/api/bots/catalog'),
+  botStatus: (pid) => request('GET', `/api/projects/${pid}/bot/status`),
+  botStart: (pid) => request('POST', `/api/projects/${pid}/bot/start`),
+  botStop: (pid) => request('POST', `/api/projects/${pid}/bot/stop`),
+  botEmulator: (pid, body) => request('POST', `/api/projects/${pid}/bot/emulator`, body),
+  botEmulatorState: (pid) => request('GET', `/api/projects/${pid}/bot/emulator`),
+  botUsers: (pid) => request('GET', `/api/projects/${pid}/bot/users`),
+  botUsersClear: (pid) => request('DELETE', `/api/projects/${pid}/bot/users`),
   // автоматизация
   automationCatalog: () => request('GET', '/api/automation/catalog'),
   autoRun: (pid, body) => request('POST', `/api/projects/${pid}/automation/run`, body),

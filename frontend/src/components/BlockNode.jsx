@@ -148,11 +148,16 @@ export default function BlockNode({ id, type, data, selected }) {
   const spec = catalog?.blocks[type]
   if (!spec) return null
   const issues = data.__issues || []
+  // у «Меню» выходы — по кнопкам: сколько кнопок, столько выходов
+  const dyn = spec.dynamic_branches
+  const branches = dyn
+    ? [...(data[dyn.field] || []).map((b) => ({ id: b.id, label: b.text || '…' })), ...dyn.extra]
+    : spec.branches
   const level = issues.some((i) => i.level === 'error') ? 'error' : issues.length ? 'warning' : ''
   return (
     <div
       className={`block ${selected ? 'selected' : ''} ${level} ${data.__active ? 'active' : ''} ${data.__step || data.__current ? 'current-step' : ''}`}
-      style={{ '--accent': spec.color }}
+      style={{ '--accent': spec.color, minHeight: branches && branches.length > 2 ? 40 + branches.length * 24 : undefined }}
       title={issues.map((i) => i.message).join('\n')}
     >
       {data.__step && (
@@ -197,15 +202,15 @@ export default function BlockNode({ id, type, data, selected }) {
         {spec.fields ? <div className="row-line auto-summary">{autoSummary(type, data)}</div> : <Summary type={type} data={data} />}
       </div>
       {issues.length > 0 && <div className={`block-issue ${level}`}>{issues[0].message}</div>}
-      {spec.branches
-        ? spec.branches.map((b, i) => (
+      {branches
+        ? branches.map((b, i) => (
             <Handle
               key={b.id}
               id={b.id}
               type="source"
               position={Position.Right}
               className={`branch-handle branch-${b.id}`}
-              style={{ top: `${35 + i * 35}%` }}
+              style={{ top: branches.length <= 2 ? `${35 + i * 35}%` : `${38 + i * 24}px` }}
               title={`выход «${b.label}»`}
             >
               <span className="handle-label">{b.label}</span>

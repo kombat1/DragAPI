@@ -24,8 +24,14 @@ import { DEFAULT_FIREWALL, normalizeFirewall } from './components/FirewallTab.js
 import { newId } from './components/ProjectSettings.jsx'
 import { AgentsModal, RecordModal } from './components/Automation.jsx'
 
-const BRANCH_LABELS = { true: 'да', false: 'нет', body: 'тело', done: 'дальше' }
-const isStart = (t) => t === 'endpoint' || t === 'trigger'
+
+const BRANCH_LABELS = { true: 'да', false: 'нет', body: 'тело', done: 'дальше', ok: 'ответ', timeout: 'нет ответа' }
+const isStart = (t) => t === 'endpoint' || t === 'trigger' || t === 'bot_command' || t === 'bot_message'
+const SPACES = [
+  ['api', '🔌 API'],
+  ['automation', '🤖 Автоматизация'],
+  ['bot', '✈ Боты'],
+]
 
 // Переименования между двумя версиями моделей -> функция, обновляющая данные блока «База данных».
 function renameRefs(before, after) {
@@ -78,6 +84,10 @@ function producedFields(n) {
   if (n.type === 'set_vars') (n.data.assignments || []).forEach((a) => a.target && out.push(a.target))
   if ((n.type === 'repeat' || n.type === 'while') && n.data.var) out.push(n.data.var)
   if ((n.type === 'http' || n.type === 'autoclick') && n.data.target) out.push(n.data.target)
+  // конструктор ботов
+  if (n.type === 'bot_command' || n.type === 'bot_message') out.push('text', 'args', 'user_name', 'username', 'user_id', 'chat_id', 'saved')
+  if ((n.type === 'bot_ask' || n.type === 'bot_menu') && n.data.var) out.push(n.data.var)
+  if (n.type === 'run_scenario' && n.data.target) out.push(n.data.target)
   return out
 }
 
@@ -105,7 +115,8 @@ const cleanNode = ({ selected, dragging, measured, resizing, ...n }) => n // esl
 const cleanEdge = ({ selected, ...e }) => e // eslint-disable-line no-unused-vars
 
 // Автораскладка: каждый эндпоинт (или «Старт») — строка слева направо, ветки — друг под другом.
-const BRANCHES = { condition: ['true', 'false'], tg_ask: ['true', 'false'], repeat: ['body', 'done'], while: ['body', 'done'] }
+const BRANCHES = { condition: ['true', 'false'], tg_ask: ['true', 'false'], bot_ask: ['ok', 'timeout'], repeat: ['body', 'done'], while: ['body', 'done'] }
+const branchesOf = (n) => (n.type === 'bot_menu' ? [...(n.data.buttons || []).map((b) => b.id), 'timeout'] : BRANCHES[n.type])
 function autoLayout(nodes, edges) {
   const COL = 290
   const ROW = 190
@@ -119,7 +130,7 @@ function autoLayout(nodes, edges) {
     if (pos[id]) return 1 // общий блок уже размещён
     pos[id] = { x: 40 + depth * COL, y: 40 + r * ROW }
     const next = new Set([...stack, id])
-    const branches = BRANCHES[byId[id].type]
+    const branches = branchesOf(byId[id])
     if (branches) {
       // ветки (да/нет, тело/дальше) — друг под другом
       let rows = 0
@@ -217,7 +228,10 @@ function Palette({ catalog }) {
 function Editor({ catalogs, projectId, onProjectsChanged, me }) {
   const [kind, setKind] = useState('api')
   const isAuto = kind === 'automation'
-  const catalog = isAuto ? catalogs.automation : catalogs.api
+  const isBot = kind === 'bot'
+  const catalog = isAuto ? catalogs.automation : isBot ? catalogs.bot : catalogs.api
+  const [bot, setBot] = useState({})
+  const [botState, setBotState] = useState(null) // {running, username, error}
   const [automation, setAutomation] = useState({})
   const [telegram, setTelegram] = useState({})
   const [agentsOpen, setAgentsOpen] = useState(false)
@@ -279,7 +293,9 @@ function Editor({ catalogs, projectId, onProjectsChanged, me }) {
       setKind(p.kind || 'api')
       setAutomation(p.automation || {})
       setTelegram(p.telegram || {})
-      setBottomTab(p.kind === 'automation' ? 'runs' : 'tests')
+      setBot(p.bot || {})
+      setBotState(null)
+      setBottomTab(p.kind === 'automation' ? 'runs' : p.kind === 'bot' ? 'emulator' : 'tests')
       setRunState(null)
       setNodes(p.nodes || [])
       setEdges(p.edges || [])
@@ -307,8 +323,8 @@ function Editor({ catalogs, projectId, onProjectsChanged, me }) {
   const nodesKey = JSON.stringify(nodes.map(cleanNode))
   const edgesKey = JSON.stringify(edges.map(cleanEdge))
   const graph = useMemo(
-    () => ({ name, kind, automation, telegram, nodes: JSON.parse(nodesKey), edges: JSON.parse(edgesKey), models, env, sandbox, libraries, firewall, tests }),
-    [name, kind, automation, telegram, nodesKey, edgesKey, models, env, sandbox, libraries, firewall, tests],
+    () => ({ name, kind, automation, telegram, bot, nodes: JSON.parse(nodesKey), edges: JSON.parse(edgesKey), models, env, sandbox, libraries, firewall, tests }),
+    [name, kind, automation, telegram, bot, nodesKey, edgesKey, models, env, sandbox, libraries, firewall, tests],
   )
 
   // живая проверка графа на бэкенде
@@ -330,6 +346,7 @@ function Editor({ catalogs, projectId, onProjectsChanged, me }) {
     try {
       const saved = await api.save(projectId, graph)
       if (saved?.automation) setAutomation(saved.automation)
+      if (saved?.bot_reload_error) notify(`Бот работает на прежней версии: ${saved.bot_reload_error}`, 'error')
       setDirty(false)
       onProjectsChanged()
     } catch (e) {
@@ -385,6 +402,30 @@ function Editor({ catalogs, projectId, onProjectsChanged, me }) {
   }
 
   const markDirty = () => setDirty(true)
+
+  // состояние работающего бота (для тулбара)
+  useEffect(() => {
+    if (!isBot) return
+    let alive = true
+    const tick = () => api.botStatus(projectId).then((s) => alive && setBotState(s)).catch(() => {})
+    tick()
+    const t = setInterval(tick, 3000)
+    return () => {
+      alive = false
+      clearInterval(t)
+    }
+  }, [isBot, projectId])
+  const botStart = async () => {
+    try {
+      await save()
+      setBotState(await api.botStart(projectId))
+      notify('Бот запущен', 'ok')
+    } catch (e) {
+      if (e.data?.detail?.issues?.length) setValidation({ ok: false, issues: e.data.detail.issues })
+      notify(`Бот не запущен: ${e.message}`, 'error')
+    }
+  }
+  const botStop = async () => setBotState(await api.botStop(projectId))
 
   const onNodesChange = useCallback((changes) => {
     setNodes((ns) => applyNodeChanges(changes, ns))
@@ -679,16 +720,17 @@ function Editor({ catalogs, projectId, onProjectsChanged, me }) {
     const ids = (debug?.steps || []).slice(0, (debug?.current ?? -1) + 1).map((s) => s.node_id)
     for (let i = 1; i < ids.length; i++) passed.add(`${ids[i - 1]}>${ids[i]}`)
     return edges.map((e) => {
-      const branch = !!BRANCH_LABELS[e.sourceHandle]
+      const menuLabel = e.sourceHandle && nodes.find((n) => n.id === e.source && n.type === 'bot_menu')?.data.buttons?.find((b) => b.id === e.sourceHandle)?.text
+      const branch = !!BRANCH_LABELS[e.sourceHandle] || !!menuLabel
       const onPath = passed.has(`${e.source}>${e.target}`) || (runVisited.has(e.source) && runVisited.has(e.target))
       return {
         ...e,
         animated: onPath,
         className: [branch ? `branch-${e.sourceHandle}` : '', onPath ? 'on-path' : ''].join(' '),
-        ...(branch ? { label: BRANCH_LABELS[e.sourceHandle], labelBgPadding: [4, 2] } : {}),
+        ...(branch ? { label: menuLabel || BRANCH_LABELS[e.sourceHandle], labelBgPadding: [4, 2] } : {}),
       }
     })
-  }, [edges, debug, runVisited])
+  }, [edges, debug, runVisited, nodes])
 
   const nodeTypes = useMemo(
     () => Object.fromEntries(Object.keys(catalog.blocks).map((t) => [t, BlockNode])),
@@ -718,6 +760,8 @@ function Editor({ catalogs, projectId, onProjectsChanged, me }) {
             ? `Ошибок: ${errors}`
             : isAuto
               ? `Сценариев: ${validation.scenarios?.length ?? 0}`
+              : isBot
+              ? `Обработчиков: ${validation.handlers?.length ?? 0}`
               : `Граф корректен · маршрутов: ${validation.routes?.length ?? 0}`}
         </span>
         {isAuto && (
@@ -751,7 +795,7 @@ function Editor({ catalogs, projectId, onProjectsChanged, me }) {
           </span>
         )}
         <button
-          onClick={() => setSettingsOpen(isAuto ? 'automation' : 'models')}
+          onClick={() => setSettingsOpen(isAuto ? 'automation' : isBot ? 'bot' : 'models')}
           title="Модели данных, переменные окружения, песочница и библиотеки"
           className={(validation.issues || []).some((i) => !i.node_id) ? 'has-issues' : ''}
         >
@@ -765,7 +809,24 @@ function Editor({ catalogs, projectId, onProjectsChanged, me }) {
         <button onClick={() => save().then(() => notify('Сохранено'))} disabled={!dirty || readOnly}>
           {dirty ? 'Сохранить' : 'Сохранено'}
         </button>
-        {isAuto ? (
+        {isBot ? (
+          <>
+            {botState?.running && botState.username && (
+              <a className="button" href={`https://t.me/${botState.username}`} target="_blank" rel="noreferrer" title={botState.error || 'Открыть бота в Telegram'}>
+                {botState.error ? '⚠' : '🟢'} @{botState.username} ↗
+              </a>
+            )}
+            {botState?.running ? (
+              <button onClick={botStop} disabled={readOnly}>
+                ■ Остановить бота
+              </button>
+            ) : (
+              <button className="primary" onClick={botStart} disabled={errors > 0 || readOnly} title="Сохранить и запустить бота в Telegram">
+                ▶ Запустить бота
+              </button>
+            )}
+          </>
+        ) : isAuto ? (
           <>
             <button onClick={() => setRecordOpen(true)} disabled={readOnly} title="Записать свои действия мышью и клавиатурой в блоки">
               ● Запись
@@ -790,7 +851,7 @@ function Editor({ catalogs, projectId, onProjectsChanged, me }) {
             {running ? 'Перезапустить' : '▶ Запустить'}
           </button>
         )}
-        {running && !isAuto && (
+        {running && !isAuto && !isBot && (
           <>
             <a className="button" href={running.docs_url} target="_blank" rel="noreferrer">
               Swagger ↗
@@ -800,7 +861,7 @@ function Editor({ catalogs, projectId, onProjectsChanged, me }) {
             </button>
           </>
         )}
-        {!isAuto && (
+        {!isAuto && !isBot && (
           <>
             <button onClick={exportZip} disabled={errors > 0} title="Скачать обычное FastAPI-приложение (с Dockerfile)">
               Экспорт в FastAPI
@@ -853,7 +914,7 @@ function Editor({ catalogs, projectId, onProjectsChanged, me }) {
           projectId={projectId}
           agent={automation.agent}
           sandboxInfo={sandboxInfo}
-          onOpenSettings={(tab) => setSettingsOpen(tab || (isAuto ? 'automation' : 'models'))}
+          onOpenSettings={(tab) => setSettingsOpen(tab || (isAuto ? 'automation' : isBot ? 'bot' : 'models'))}
           onTestEndpoint={(id) => {
             setFocusEndpoint(null)
             setTimeout(() => setFocusEndpoint(id))
@@ -874,6 +935,7 @@ function Editor({ catalogs, projectId, onProjectsChanged, me }) {
         models={models}
         tab={bottomTab}
         setTab={setBottomTab}
+        botProps={isBot ? { graph, readOnly, running: !!botState?.running, onTrace: setActiveNodes } : null}
         runsProps={
           isAuto
             ? {
@@ -913,7 +975,7 @@ function Editor({ catalogs, projectId, onProjectsChanged, me }) {
           projectId={projectId}
           initialTab={settingsOpen}
           kind={kind}
-          project={{ models, env, sandbox, libraries, firewall, automation, telegram }}
+          project={{ models, env, sandbox, libraries, firewall, automation, telegram, bot }}
           setProject={(patch) => {
             if (patch.models) {
               // переименования моделей и полей (по постоянным id) переносим в блоки «База данных»
@@ -927,6 +989,7 @@ function Editor({ catalogs, projectId, onProjectsChanged, me }) {
             if (patch.firewall) setFirewall(patch.firewall)
             if (patch.automation) setAutomation(patch.automation)
             if (patch.telegram) setTelegram(patch.telegram)
+            if (patch.bot) setBot(patch.bot)
             markDirty()
           }}
           sandboxInfo={sandboxInfo}
@@ -964,6 +1027,14 @@ export default function App() {
 function Workspace({ me, onLogout }) {
   const [catalogs, setCatalogs] = useState(null)
   const [newOpen, setNewOpen] = useState(false)
+  const [space, setSpace] = useState(() => {
+    try {
+      return localStorage.getItem('dragapi.space') || 'api'
+    } catch {
+      return 'api'
+    }
+  })
+  const lastInSpace = useRef({})
   const [projects, setProjects] = useState([])
   const [projectId, setProjectId] = useState(() => {
     try {
@@ -986,10 +1057,19 @@ function Workspace({ me, onLogout }) {
   )
 
   useEffect(() => {
-    Promise.all([api.blocks(), api.automationCatalog(), loadProjects()])
-      .then(([c, auto, ps]) => {
-        setCatalogs({ api: c, automation: { ...auto, automation: true, port_types: { flow: 'Порядок выполнения' } } })
-        setProjectId((cur) => (ps.some((p) => p.id === cur) ? cur : ps[0]?.id || null))
+    Promise.all([api.blocks(), api.automationCatalog(), api.botsCatalog(), loadProjects()])
+      .then(([c, auto, botCat, ps]) => {
+        setCatalogs({
+          api: c,
+          automation: { ...auto, automation: true, port_types: { flow: 'Порядок выполнения' } },
+          bot: { ...botCat, automation: true, bot: true, port_types: { flow: 'Порядок выполнения' } },
+        })
+        setProjectId((cur) => {
+          const id = ps.some((p) => p.id === cur) ? cur : ps.find((p) => (p.kind || 'api') === space)?.id || null
+          const proj = ps.find((p) => p.id === id)
+          if (proj) setSpace(proj.kind || 'api')
+          return id
+        })
       })
       .catch(() => setError('Бэкенд недоступен. Запустите: cd backend && .venv/bin/uvicorn app.main:app --port 8765'))
   }, [loadProjects])
@@ -1006,8 +1086,24 @@ function Workspace({ me, onLogout }) {
   const doCreate = async (name, kind) => {
     const p = await api.createProject(name, kind)
     await loadProjects()
+    setSpace(kind)
     setProjectId(p.id)
     setNewOpen(false)
+  }
+  useEffect(() => {
+    try {
+      localStorage.setItem('dragapi.space', space)
+    } catch {
+      /* не запомнится */
+    }
+  }, [space])
+  const inSpace = projects.filter((p) => (p.kind || 'api') === space)
+  const switchSpace = (k) => {
+    if (projectId) lastInSpace.current[space] = projectId
+    setSpace(k)
+    const list = projects.filter((p) => (p.kind || 'api') === k)
+    const remembered = lastInSpace.current[k]
+    setProjectId(list.some((p) => p.id === remembered) ? remembered : list[0]?.id || null)
   }
 
   const deleteProject = async () => {
@@ -1027,10 +1123,18 @@ function Workspace({ me, onLogout }) {
           <div className="logo">
             Drag<span>API</span>
           </div>
-          <select value={projectId || ''} onChange={(e) => setProjectId(e.target.value)}>
-            {projects.map((p) => (
+          <div className="spaces" role="tablist">
+            {SPACES.map(([k, label]) => (
+              <button key={k} role="tab" className={`space ${space === k ? 'active' : ''}`} onClick={() => switchSpace(k)}>
+                {label}
+                <span className="muted"> {projects.filter((p) => (p.kind || 'api') === k).length}</span>
+              </button>
+            ))}
+          </div>
+          <select value={projectId || ''} onChange={(e) => setProjectId(e.target.value)} disabled={!inSpace.length}>
+            {!inSpace.length && <option value="">— нет проектов —</option>}
+            {inSpace.map((p) => (
               <option key={p.id} value={p.id}>
-                {p.kind === 'automation' ? '🤖 ' : '🔌 '}
                 {p.name}
                 {p.role && p.role !== 'owner' ? ` (${{ editor: 'редактор', viewer: 'просмотр' }[p.role]})` : ''}
               </option>
@@ -1039,7 +1143,7 @@ function Workspace({ me, onLogout }) {
           <button className="small" onClick={createProject}>
             + Проект
           </button>
-          {projectId && (!me || projects.find((p) => p.id === projectId)?.role === 'owner') && (
+          {projectId && inSpace.some((p) => p.id === projectId) && (!me || projects.find((p) => p.id === projectId)?.role === 'owner') && (
             <button className="small danger" onClick={deleteProject}>
               Удалить
             </button>
@@ -1047,23 +1151,24 @@ function Workspace({ me, onLogout }) {
           <div className="spacer" />
           {me && <UserMenu me={me} onLogout={onLogout} />}
         </nav>
-        {projectId ? (
+        {projectId && inSpace.some((p) => p.id === projectId) ? (
           <ReactFlowProvider key={`${projectId}-${reloadKey}`}>
             <Editor catalogs={catalogs} projectId={projectId} onProjectsChanged={loadProjects} me={me} />
           </ReactFlowProvider>
         ) : (
           <div className="fatal">
-            Проектов пока нет. <button onClick={createProject}>Создать проект</button>
+            {{ api: 'API-проектов', automation: 'Сценариев автоматизации', bot: 'Ботов' }[space]} пока нет.{' '}
+            <button onClick={createProject}>Создать</button>
           </div>
         )}
-        {newOpen && <NewProjectModal onCreate={doCreate} onClose={() => setNewOpen(false)} />}
+        {newOpen && <NewProjectModal initialKind={space} onCreate={doCreate} onClose={() => setNewOpen(false)} />}
       </div>
     </CatalogContext.Provider>
   )
 }
 
-function NewProjectModal({ onCreate, onClose }) {
-  const [kind, setKind] = useState('api')
+function NewProjectModal({ onCreate, onClose, initialKind = 'api' }) {
+  const [kind, setKind] = useState(initialKind)
   const [name, setName] = useState('')
   const [error, setError] = useState(null)
   useEffect(() => {
@@ -1074,7 +1179,7 @@ function NewProjectModal({ onCreate, onClose }) {
   const submit = async (e) => {
     e.preventDefault()
     try {
-      await onCreate(name.trim() || (kind === 'automation' ? 'Новый сценарий' : 'Новый проект'), kind)
+      await onCreate(name.trim() || ({ automation: 'Новый сценарий', bot: 'Новый бот' }[kind] || 'Новый проект'), kind)
     } catch (err) {
       setError(err.message)
     }
@@ -1092,6 +1197,7 @@ function NewProjectModal({ onCreate, onClose }) {
           {[
             ['api', '🔌 API', 'HTTP-эндпоинты, база данных, код — экспорт в FastAPI и деплой в Docker'],
             ['automation', '🤖 Автоматизация', 'Сценарии действий на компьютере: мышь, клавиатура, автокликер, запись, расписание и горячие клавиши'],
+            ['bot', '✈ Telegram-бот', 'Конструктор ботов: команды, меню с кнопками, вопросы и анкеты, данные пользователей, тест-чат'],
           ].map(([k, title, desc]) => (
             <label key={k} className={`kind-card ${kind === k ? 'on' : ''}`}>
               <input type="radio" name="kind" checked={kind === k} onChange={() => setKind(k)} />
@@ -1102,7 +1208,7 @@ function NewProjectModal({ onCreate, onClose }) {
         </div>
         <label className="field">
           <span className="field-label">Название</span>
-          <input autoFocus value={name} placeholder={kind === 'automation' ? 'Новый сценарий' : 'Новый проект'} onChange={(e) => setName(e.target.value)} />
+          <input autoFocus value={name} placeholder={{ automation: 'Новый сценарий', bot: 'Новый бот' }[kind] || 'Новый проект'} onChange={(e) => setName(e.target.value)} />
         </label>
         {error && <div className="issue error">{error}</div>}
         <div className="modal-foot">

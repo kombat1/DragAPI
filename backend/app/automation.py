@@ -572,6 +572,7 @@ def _trigger(nid: str, data: dict, err) -> Trigger | None:
 class _Walker:
     def __init__(self, nodes, outgoing, reached, err, warn, telegram=None):
         self.telegram = telegram or TelegramSettings()
+        self.blocks = AUTO_BLOCKS
         self.nodes, self.outgoing, self.reached = nodes, outgoing, reached
         self.err, self.warn = err, warn
         self.budget = MAX_STEPS
@@ -632,7 +633,7 @@ class _Walker:
         return steps
 
     def _step(self, nid: str, ntype: str, data: dict) -> dict | None:
-        spec = AUTO_BLOCKS[ntype]
+        spec = self.blocks[ntype]
         ok = True
 
         def fail(msg):

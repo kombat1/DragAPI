@@ -123,6 +123,9 @@ class TelegramManager:
     def sync(self):
         """После изменения включённых проектов: запустить нужные опросчики, остановить лишние."""
         wanted = {c.telegram_token for c in self.hub.enabled.values() if c.telegram.configured and c.telegram_token}
+        from .bots import manager as bot_manager
+        busy = {t for t in wanted if bot_manager.uses_token(t)}   # токен занят ботом из конструктора
+        wanted -= busy
         for token in wanted:
             self._ensure(token)
         for token, poller in list(self.pollers.items()):

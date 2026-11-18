@@ -80,6 +80,14 @@ def create(name: str, kind: str = "api") -> dict:
     pid = f"{slug}-{uuid.uuid4().hex[:6]}"
     project = {"name": name, "kind": kind, "nodes": [], "edges": [], "models": [], "env": [],
                "sandbox": {}, "libraries": {"packages": [], "only_binary": True}}
+    if kind == "bot":
+        project["bot"] = {"token_env": ""}
+        project["nodes"] = [
+            {"id": "start", "type": "bot_command", "position": {"x": 80, "y": 120},
+             "data": {"command": "start", "description": "Начать"}},
+            {"id": "hello", "type": "bot_send", "position": {"x": 380, "y": 120},
+             "data": {"text": "Привет, {user_name}! Я бот, собранный в DragAPI.", "links": [], "chat": ""}}]
+        project["edges"] = [{"id": "e-start", "source": "start", "target": "hello"}]
     if kind == "automation":
         project["automation"] = {"agent": "local", "enabled": False}
         project["nodes"] = [{"id": "start", "type": "trigger", "position": {"x": 80, "y": 120},

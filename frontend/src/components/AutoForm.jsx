@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { api } from '../api.js'
 import ListEditor from './ListEditor.jsx'
+import { AutomationProjectSelect, ButtonsInput, LinksInput } from './Bots.jsx'
 
 // Форма блока автоматизации строится по описанию полей из каталога (backend: app/automation.py).
 
@@ -253,6 +254,24 @@ function FieldInput({ f, d, set, variables }) {
           />
         </Field>
       )
+    case 'buttons':
+      return (
+        <Field label={f.label} hint={f.hint || 'Каждая кнопка — отдельный выход блока; подключите к нему свою ветку.'}>
+          <ButtonsInput value={value} onChange={put} ListEditor={ListEditor} />
+        </Field>
+      )
+    case 'links':
+      return (
+        <Field label={f.label} hint={f.hint}>
+          <LinksInput value={value} onChange={put} ListEditor={ListEditor} />
+        </Field>
+      )
+    case 'automation_project':
+      return (
+        <Field label={f.label} hint={f.hint}>
+          <AutomationProjectSelect value={value} onChange={put} />
+        </Field>
+      )
     case 'template':
       return (
         <Field label={f.label} hint={f.hint || TEMPLATE_HINT}>
@@ -332,6 +351,22 @@ export function autoSummary(type, d) {
       return `${d.method} ${d.url} → ${d.target}`
     case 'telegram':
       return `«${String(d.text || '').slice(0, 40)}»${d.chat ? ` → ${d.chat}` : ''}`
+    case 'bot_command':
+      return `/${d.command}${d.description ? ` — ${d.description}` : ''}`
+    case 'bot_message':
+      return d.match === 'any' ? 'любое сообщение' : `${{ equals: '=', contains: '∋', regex: '~' }[d.match] || ''} «${d.pattern}»`
+    case 'bot_send':
+      return `«${String(d.text || '').slice(0, 40)}»${(d.links || []).length ? ` +${d.links.length} 🔗` : ''}${d.chat ? ` → ${d.chat}` : ''}`
+    case 'bot_photo':
+      return d.url
+    case 'bot_ask':
+      return `${String(d.text || '').slice(0, 30)} → ${d.var}`
+    case 'bot_menu':
+      return String(d.text || '').slice(0, 40)
+    case 'bot_save':
+      return (d.assignments || []).map((a) => `${a.target} = ${a.expr}`).join('; ')
+    case 'run_scenario':
+      return `${d.scenario} ${d.project ? '' : '(проект не выбран)'}`
     case 'tg_ask':
       return `${String(d.text || '').slice(0, 30)} [${d.yes} / ${d.no}] ⌛${d.timeout} с`
     default:

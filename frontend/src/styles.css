@@ -382,3 +382,30 @@ kbd { font-family: var(--mono); font-size: 11px; padding: 0 4px; border: 1px sol
 .chips { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
 .chips .chip button { border: none; background: none; padding: 0 0 0 4px; color: inherit; }
 .chat-input { width: 160px; }
+
+/* ---------- пространства и конструктор ботов ---------- */
+.spaces { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.space { border: none; border-radius: 0; background: transparent; padding: 5px 12px; }
+.space + .space { border-left: 1px solid var(--border); }
+.space.active { background: color-mix(in srgb, var(--primary) 12%, var(--panel)); color: var(--primary); font-weight: 600; }
+.kind-choice { grid-template-columns: repeat(3, 1fr); }
+.emulator { display: flex; gap: 12px; height: 100%; }
+.emu-chat { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.emu-messages { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; padding: 6px; background: var(--code-bg); border-radius: 8px; }
+.bubble { max-width: 70%; padding: 6px 10px; border-radius: 12px; background: var(--panel); border: 1px solid var(--border); display: flex; flex-direction: column; gap: 4px; }
+.bubble.user { align-self: flex-end; background: color-mix(in srgb, var(--primary) 14%, var(--panel)); }
+.bubble.bot { align-self: flex-start; }
+.bubble-text { white-space: pre-wrap; word-break: break-word; }
+.bubble-time { font-size: 10px; color: var(--muted); align-self: flex-end; }
+.emu-button { display: block; text-align: center; padding: 4px 8px; border-radius: 6px; border: 1px solid color-mix(in srgb, var(--primary) 40%, var(--border)); color: var(--primary); background: var(--panel); text-decoration: none; }
+.emu-photo { max-width: 240px; border-radius: 8px; }
+.emu-input { display: flex; gap: 6px; }
+.emu-input input { flex: 1; min-width: 0; }
+.emu-side { flex: 0 0 300px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
+.bot-log { display: flex; flex-direction: column; gap: 2px; overflow-y: auto; height: 100%; }
+@media (max-width: 700px) {
+  .kind-choice { grid-template-columns: 1fr; }
+  .emulator { flex-direction: column; }
+  .emu-side { flex: none; }
+  .spaces .space { padding: 5px 8px; }
+}

@@ -25,7 +25,7 @@ from starlette.routing import Mount, Router
 
 import asyncio
 
-from . import auth, automation, codegen, sandbox, storage, testing, vault
+from . import auth, automation, bots, codegen, sandbox, storage, testing, vault
 from .agents import LOCAL_ID, agent_bundle, hub
 from .config import ConfigError
 from .deploy import deployments, docker_available
@@ -59,7 +59,10 @@ async def lifespan(_app):
     elif hub.local_error:
         print(f"DragAPI: локальный агент автоматизации недоступен — {hub.local_error}")
     hub.scheduler_task = asyncio.ensure_future(hub.scheduler())
+    bots.manager.hub, bots.manager.loop = hub, loop
+    await bots.manager.autostart()
     yield
+    bots.manager.stop_all()
     hub.scheduler_task.cancel()
     hub.telegram.stop_all()
     hub.stop_local()
@@ -313,6 +316,7 @@ class GraphIn(BaseModel):
     kind: str = "api"
     automation: dict = {}
     telegram: dict = {}
+    bot: dict = {}
     nodes: list[dict] = []
     edges: list[dict] = []
     models: list[dict] = []
@@ -349,8 +353,8 @@ def _load(pid: str) -> dict:
 
 
 def _compile(project: dict) -> CompiledProject:
-    if project.get("kind") == "automation":
-        raise HTTPException(400, {"message": "это проект-автоматизация: у него нет HTTP-API для запуска, "
+    if project.get("kind") in ("automation", "bot"):
+        raise HTTPException(400, {"message": "это не API-проект: у него нет HTTP-API для запуска, "
                                              "экспорта и деплоя", "issues": []})
     try:
         return compile_project(project)
@@ -535,10 +539,10 @@ def projects(request: Request):
 
 @app.post("/api/projects")
 def create_project(body: CreateIn, request: Request):
-    if body.kind not in ("api", "automation"):
-        raise HTTPException(400, "тип проекта: api или automation")
-    project = storage.create(body.name.strip() or ("Новый сценарий" if body.kind == "automation" else "Новый проект"),
-                             body.kind)
+    if body.kind not in ("api", "automation", "bot"):
+        raise HTTPException(400, "тип проекта: api, automation или bot")
+    default = {"automation": "Новый сценарий", "bot": "Новый бот"}.get(body.kind, "Новый проект")
+    project = storage.create(body.name.strip() or default, body.kind)
     if _user(request):
         auth.store.set_owner(project["id"], _user(request)["id"])
     return project
@@ -594,7 +598,10 @@ def save_project(pid: str, body: GraphIn, request: Request):
     saved = storage.save(pid, data)
     if saved.get("kind") == "automation" or (stored.get("automation") or {}).get("enabled"):
         hub.refresh_project(pid, saved)
-    return _public_project(saved)
+    out = _public_project(saved)
+    if saved.get("kind") == "bot":
+        out["bot_reload_error"] = bots.manager.reload(pid, saved)
+    return out
 
 
 @app.delete("/api/projects/{pid}")
@@ -604,6 +611,9 @@ async def delete_project(pid: str):
     runner.unmount(pid)
     envs.remove(pid)
     hub.refresh_project(pid, None)
+    await bots.manager.stop(pid)
+    bots.manager.emulators.pop(pid, None)
+    (bots.BOTS_DIR / f"{pid}.json").unlink(missing_ok=True)
     try:
         storage.delete(pid)
     except storage.NotFound:
@@ -638,6 +648,12 @@ def restore_version(pid: str, version: str):
 @app.post("/api/validate")
 def validate(body: GraphIn, project_id: str | None = None):
     """Проверка графа без сохранения — фронтенд вызывает её при каждом изменении."""
+    if body.kind == "bot":
+        try:
+            compiled_bot = bots.compile_bot(body.model_dump())
+        except GraphError as e:
+            return {"ok": False, "issues": [i.as_dict() for i in e.issues]}
+        return {"ok": True, "issues": [w.as_dict() for w in compiled_bot.warnings], "handlers": compiled_bot.summary()}
     if body.kind == "automation":
         try:
             compiled = automation.compile_automation(body.model_dump())
@@ -1096,6 +1112,94 @@ async def telegram_check(pid: str, body: TelegramTestIn):
             except tg.TelegramError as e:
                 out["errors"].append(f"{chat}: {e}")
     return out
+
+
+# --- конструктор ботов ---
+
+def _bot_project(pid: str) -> dict:
+    project = _load(pid)
+    if project.get("kind") != "bot":
+        raise HTTPException(400, "это не проект-бот")
+    return project
+
+
+class EmulatorIn(BaseModel):
+    graph: GraphIn | None = None
+    text: str | None = None
+    button: dict | None = None     # {message_id, data, text}
+    reset: bool = False
+
+
+@app.get("/api/bots/catalog")
+def bots_catalog():
+    return bots.catalog()
+
+
+@app.get("/api/projects/{pid}/bot/status")
+def bot_status(pid: str):
+    _bot_project(pid)
+    live = bots.manager.live.get(pid)
+    return {**bots.manager.status(pid), "log": list(live.engine.log)[:150] if live else []}
+
+
+@app.post("/api/projects/{pid}/bot/start")
+async def bot_start(pid: str):
+    _bot_project(pid)
+    try:
+        await bots.manager.start(pid)
+    except GraphError as e:
+        raise HTTPException(400, {"message": "в графе бота есть ошибки", "issues": [i.as_dict() for i in e.issues]})
+    except (ValueError, vault.VaultError) as e:
+        raise HTTPException(409, {"message": str(e), "issues": []}) from None
+    return bot_status(pid)
+
+
+@app.post("/api/projects/{pid}/bot/stop")
+async def bot_stop(pid: str):
+    _bot_project(pid)
+    await bots.manager.stop(pid)
+    return bot_status(pid)
+
+
+@app.post("/api/projects/{pid}/bot/emulator")
+async def bot_emulator(pid: str, body: EmulatorIn):
+    """Тест-чат: сообщение или нажатие кнопки — бот по текущему (несохранённому) графу, без Telegram."""
+    project = _bot_project(pid)
+    graph = {**body.graph.model_dump(), "kind": "bot"} if body.graph else project
+    try:
+        compiled = bots.compile_bot(_with_secrets(pid, graph))
+    except GraphError as e:
+        raise HTTPException(400, {"message": "в графе бота есть ошибки", "issues": [i.as_dict() for i in e.issues]})
+    engine = bots.manager.emulator(pid, compiled, reset=body.reset)
+    if body.text is not None or body.button is not None:
+        await bots.emulate(engine, body.text, body.button)
+    return _emulator_state(engine)
+
+
+def _emulator_state(engine) -> dict:
+    return {"messages": engine.transport.messages, "log": list(engine.log)[:100],
+            "waiting": engine.waiters.get(f"{bots.EMU_CHAT}:{bots.EMU_USER['id']}") is not None,
+            "saved": (engine.store.data["users"].get(str(bots.EMU_USER["id"])) or {}).get("saved", {})}
+
+
+@app.get("/api/projects/{pid}/bot/emulator")
+def bot_emulator_state(pid: str):
+    _bot_project(pid)
+    engine = bots.manager.emulators.get(pid)
+    return _emulator_state(engine) if engine else {"messages": [], "log": [], "waiting": False, "saved": {}}
+
+
+@app.get("/api/projects/{pid}/bot/users")
+def bot_users(pid: str):
+    _bot_project(pid)
+    return bots.manager.store(pid).users()
+
+
+@app.delete("/api/projects/{pid}/bot/users")
+def bot_users_clear(pid: str):
+    _bot_project(pid)
+    bots.manager.store(pid).clear()
+    return {"ok": True}
 
 
 # --- агенты ---

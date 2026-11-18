@@ -18,6 +18,9 @@ def _test_secret_key(monkeypatch, tmp_path):
     test_hub = agents.AgentHub(tmp_path / "agents")
     monkeypatch.setattr(agents, "hub", test_hub)
     monkeypatch.setattr(main, "hub", test_hub)
+    from app import bots
+    monkeypatch.setattr(bots, "BOTS_DIR", tmp_path / "bots")
+    monkeypatch.setattr(bots, "manager", bots.BotManager())
     monkeypatch.setattr(auth, "store", auth.AuthStore(tmp_path / "auth"))
     vault.reset_cache()
     yield
