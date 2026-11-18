@@ -27,19 +27,26 @@ No-code / low-code конструктор HTTP API: блоки перетаск�
 
 ## Запуск
 
-```bash
-# бэкенд (порт 8765; 8000 на этой машине занят)
-cd backend
-python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-.venv/bin/python -m app --reload            # http://localhost:8765; --no-auth — без входа (см. ниже)
+Одна команда — сама ставит недостающие зависимости (Python-окружение, npm-пакеты) и запускает всё:
 
-# фронтенд в режиме разработки (http://localhost:5173, проксирует /api и /run на 8765)
-cd frontend
-npm install
-npm run dev
+```bash
+./start.sh                 # обычный режим → http://localhost:8765 (интерфейс пересобирается, только если менялся)
+./start.sh dev             # разработка → http://localhost:5173: бэкенд перезапускается при правках backend/app,
+                           #   интерфейс обновляется сразу; Ctrl+C останавливает оба
+./start.sh --no-auth       # флаги передаются серверу: --no-auth, --port 9000, --host 0.0.0.0, --no-local-agent
+./start.sh setup           # только поставить / обновить зависимости
 ```
 
-Либо собрать фронтенд (`npm run build`), и бэкенд будет сам раздавать его на http://localhost:8765.
+Если порт занят, скрипт покажет, каким процессом. Порт интерфейса в режиме разработки —
+`DRAGAPI_FRONT_PORT=5174 ./start.sh dev`. Нужны Python 3.10+ и Node.js 18+.
+
+Вручную то же самое:
+
+```bash
+cd backend && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+.venv/bin/python -m app                      # http://localhost:8765 (раздаёт собранный frontend/dist)
+cd frontend && npm install && npm run build  # или npm run dev — http://localhost:5173 с прокси на 8765
+```
 
 Тесты: `cd backend && .venv/bin/python -m pytest -q` (долгий тест настоящего деплоя — `DRAGAPI_DOCKER_TESTS=1`).
 
