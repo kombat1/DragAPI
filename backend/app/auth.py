@@ -5,7 +5,9 @@ data/sessions.json  сессии: хранится только SHA-256 токе
 data/acl.json       права: {pid: {"owner": user_id, "members": {user_id: "editor" | "viewer"}}}
 
 Роли в проекте: owner > editor > viewer. Администратор платформы имеет права владельца везде.
-Выключить вход (одиночная локальная работа): DRAGAPI_AUTH=off.
+Выключить вход (одиночная локальная работа): `python -m app --no-auth`, DRAGAPI_AUTH=off или
+auth = false в dragapi.toml — но только пока не заведено ни одного пользователя. Если пользователи есть,
+сервер без входа не запустится, а вход остаётся обязательным при любых настройках.
 """
 
 from __future__ import annotations
@@ -37,8 +39,29 @@ class AuthError(Exception):
         self.status = status
 
 
+def off_requested() -> tuple[bool, str]:
+    """Просили ли выключить вход и откуда: флаг --no-auth / DRAGAPI_AUTH или auth = false в dragapi.toml."""
+    env = os.environ.get("DRAGAPI_AUTH", "").strip().lower()
+    if env:
+        return env in ("off", "0", "false", "no"), "флаг --no-auth (переменную DRAGAPI_AUTH)"
+    from . import config
+    if config.load().get("auth") is False:
+        return True, f"auth = false из {config.path()}"
+    return False, ""
+
+
 def enabled() -> bool:
-    return os.environ.get("DRAGAPI_AUTH", "on").strip().lower() not in ("off", "0", "false", "no")
+    """Вход выключается только в платформе без пользователей; как только они есть — вход обязателен."""
+    return not (off_requested()[0] and store.setup_required())
+
+
+def check_startup():
+    """Отказ запускаться без входа, если пользователи уже заведены."""
+    off, source = off_requested()
+    if off and not store.setup_required():
+        raise AuthError(
+            f"запуск без авторизации запрещён: в платформе уже есть пользователи ({len(store.users())}). "
+            f"Уберите {source} и войдите под своей учётной записью.")
 
 
 def hash_password(password: str) -> str:

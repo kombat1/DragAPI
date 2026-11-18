@@ -24,6 +24,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Mount, Router
 
 from . import auth, codegen, sandbox, storage, testing, vault
+from .config import ConfigError
 from .deploy import deployments, docker_available
 from .pyenv import envs, validate_packages
 from .blocks import catalog
@@ -34,6 +35,12 @@ from .runtime import Database, DatabaseError, IngressFirewall
 
 @asynccontextmanager
 async def lifespan(_app):
+    try:
+        auth.check_startup()
+    except (auth.AuthError, ConfigError) as e:
+        raise SystemExit(f"DragAPI: {e}") from None
+    if not auth.enabled():
+        print("DragAPI: вход выключен — платформа открыта всем, кто может достучаться до сервера")
     storage.seed_examples()
     migrated = storage.migrate_secrets()
     if migrated:
@@ -59,6 +66,10 @@ async def access_control(request: Request, call_next):
         # браузер не даст чужому сайту выставить этот заголовок — защита от CSRF
         return FastJSON({"detail": "нет заголовка X-DragAPI"}, status_code=403)
     if not auth.enabled():
+        if path.startswith("/api/users") or path == "/api/auth/setup":
+            # пользователь, заведённый при выключенном входе, сразу заблокировал бы текущий сеанс
+            return FastJSON({"detail": "вход выключен: чтобы завести пользователей, запустите сервер со входом"},
+                            status_code=409)
         return await call_next(request)
     user = auth.store.user_by_token(request.cookies.get(auth.COOKIE))
     request.state.user = user

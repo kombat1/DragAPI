@@ -1234,3 +1234,60 @@ def test_cycle_still_detected():
         if e["source"] == "create-logic":
             e["target"] = "create-check"  # create-check -> create-logic -> create-check
     assert "цикл" in _issues(g)
+
+
+# --- запуск без входа: только пока нет пользователей ---
+
+def test_no_auth_only_without_users(tmp_path, monkeypatch):
+    from app import auth, config
+    monkeypatch.setattr(storage, "DATA_DIR", tmp_path / "projects")
+    monkeypatch.setattr(storage, "DB_DIR", tmp_path / "db")
+    client = TestClient(platform_app, headers={"X-DragAPI": "1"})
+
+    monkeypatch.setenv("DRAGAPI_AUTH", "off")             # флаг --no-auth
+    auth.check_startup()                                  # пользователей нет — можно
+    assert client.get("/api/auth/me").json()["auth"] is False
+    assert client.get("/api/projects").status_code == 200
+    # заводить пользователей при выключенном входе нельзя — это заперло бы текущий сеанс
+    assert client.post("/api/users", json={"username": "ann", "password": "ann-password"}).status_code == 409
+    assert client.post("/api/auth/setup", json={"username": "ann", "password": "ann-password"}).status_code == 409
+
+    auth.store.create_user("boss", "very-secret-1", "admin")
+    with pytest.raises(auth.AuthError, match="запрещён"):
+        auth.check_startup()
+    assert auth.enabled()                                 # и даже если сервер уже работал — вход обязателен
+    assert client.get("/api/projects").status_code == 401
+
+    # то же через файл настроек
+    monkeypatch.delenv("DRAGAPI_AUTH")
+    cfg = tmp_path / "dragapi.toml"
+    cfg.write_text("auth = false\nport = 9001\n")
+    monkeypatch.setenv("DRAGAPI_CONFIG", str(cfg))
+    assert config.load() == {"auth": False, "port": 9001}
+    with pytest.raises(auth.AuthError, match="dragapi.toml"):
+        auth.check_startup()
+    cfg.write_text("auth = true\n")
+    auth.check_startup()                                  # вход включён — всё в порядке
+
+    cfg.write_text("auth = 'off'\n")
+    with pytest.raises(config.ConfigError, match="bool"):
+        config.load()
+    cfg.write_text("autth = false\n")
+    with pytest.raises(config.ConfigError, match="неизвестный"):
+        config.load()
+
+
+def test_no_auth_config_without_users(tmp_path, monkeypatch):
+    from app import auth, config
+    monkeypatch.delenv("DRAGAPI_AUTH")
+    cfg = tmp_path / "dragapi.toml"
+    cfg.write_text("auth = false\n")
+    monkeypatch.setenv("DRAGAPI_CONFIG", str(cfg))
+    auth.check_startup()
+    assert not auth.enabled()
+    monkeypatch.setenv("DRAGAPI_CONFIG", str(tmp_path / "nope.toml"))
+    with pytest.raises(config.ConfigError, match="не найден"):   # явно указанный файл обязан быть
+        auth.check_startup()
+    monkeypatch.delenv("DRAGAPI_CONFIG")
+    monkeypatch.setattr(config, "DEFAULT_PATH", tmp_path / "nope.toml")
+    assert auth.enabled()                                 # без файла и флага — вход по умолчанию включён

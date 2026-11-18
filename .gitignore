@@ -8,3 +8,6 @@ __pycache__/
 # рабочие данные платформы: проекты, история, базы превью, окружения, сокеты, ключ шифрования
 # (примеры для первого запуска — в backend/examples/)
 backend/data/
+
+# локальные настройки сервера (образец — backend/dragapi.example.toml)
+backend/dragapi.toml
