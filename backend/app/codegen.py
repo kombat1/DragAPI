@@ -12,7 +12,7 @@ import inspect
 from . import runtime
 from .expr import FUNCTIONS_SOURCE, to_python
 from .graph import (
-    AuthStep, Branch, Chain, CodeStep, CompiledProject, DbStep, EndpointPlan, FieldSpec, InputStep,
+    AuthStep, Branch, Chain, CodeStep, CompiledProject, DbStep, EndpointPlan, FieldSpec, InputStep, ScenarioStep,
     LogicStep, Rule, ValidateStep, iter_steps,
 )
 from .interpreter import JSON_PARAM
@@ -102,6 +102,16 @@ def _emit_step(step, out: list[str], pad: str, plan: EndpointPlan) -> None:
         if step.op == "list" and step.count_target:
             out.append(f"{pad}ctx[{step.count_target!r}] = await run_in_threadpool(db.count, {step.model!r}, {filters})")
 
+    elif isinstance(step, ScenarioStep):
+        out.append(f"{pad}# Запустить сценарий «{step.scenario}» проекта {step.project} — блок {step.node_id}")
+        base = f"ENV.get({step.url_env!r}) or os.environ.get({step.url_env!r})" if step.url_env else "None"
+        out.append(f"{pad}try:")
+        out.append(f"{pad}    ctx[{step.target!r}] = await call_scenario({base}, {step.project!r}, {step.scenario!r}, "
+                   f"ENV.get({step.token_env!r}) or os.environ.get({step.token_env!r}), "
+                   f"jsonable_encoder({_dict_literal(step.params)}))")
+        out.append(f"{pad}except ScenarioError as e:")
+        out.append(f"{pad}    return JSONResponse({{'error': str(e), 'block': {step.node_id!r}}}, status_code=502)")
+
     elif isinstance(step, CodeStep):
         out.append(f"{pad}# Python-код — блок {step.node_id} (blocks/{step.module}.py)")
         out.append(f"{pad}result = await run_in_threadpool({step.module}, jsonable_encoder(ctx), dict(ENV))")
@@ -179,7 +189,11 @@ def code_steps(project: CompiledProject) -> list[CodeStep]:
 
 def needs_runtime(project: CompiledProject) -> bool:
     return (project.uses_db or any(p.auths for p in project.plans) or bool(code_steps(project))
-            or project.firewall.ingress.enabled)
+            or project.firewall.ingress.enabled or uses_scenarios(project))
+
+
+def uses_scenarios(project: CompiledProject) -> bool:
+    return any(isinstance(s, ScenarioStep) for p in project.plans for s in iter_steps(p.chain))
 
 
 def generate(project: CompiledProject) -> str:
@@ -260,6 +274,8 @@ def requirements(project: CompiledProject) -> str:
     req = "fastapi>=0.110\nuvicorn[standard]>=0.29\npython-multipart>=0.0.9\n"
     if needs_runtime(project):
         req += "sqlalchemy>=2.0\n"
+    if uses_scenarios(project):
+        req += "httpx>=0.27\n"
     if project.packages:
         req += "# библиотеки для блоков «Python-код»\n" + "".join(p + "\n" for p in project.packages)
     return req

@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import inspect
+import os
 import time
 from collections import deque
 from typing import Any, Optional
@@ -21,10 +22,10 @@ from starlette.concurrency import run_in_threadpool
 
 from . import expr, sandbox
 from .graph import (
-    AuthStep, Branch, Chain, CodeStep, CompiledProject, DbStep, EndpointPlan, FieldSpec, InputStep,
+    AuthStep, Branch, Chain, CodeStep, CompiledProject, DbStep, EndpointPlan, FieldSpec, InputStep, ScenarioStep,
     LogicStep, ValidateStep, check_rule,
 )
-from .runtime import Database, DatabaseError, apply_code_result, check_auth
+from .runtime import Database, DatabaseError, apply_code_result, check_auth, ScenarioError, call_scenario
 
 PY_TYPES = {"str": str, "int": int, "float": float, "bool": bool, "file": UploadFile}
 JSON_PARAM = "json_body_"
@@ -191,6 +192,16 @@ class _Run:
             except Exception as e:  # ошибка БД — показываем, в каком блоке
                 raise StepFailure(step.node_id, 500, {"error": f"БД ({step.op} {step.model}): {type(e).__name__}: {e}"})
             ctx[step.target] = result
+
+        elif isinstance(step, ScenarioStep):
+            params = {a.target: self.eval(step.node_id, a) for a in step.params}
+            base = self.env.get(step.url_env) if step.url_env else None
+            base = base or os.environ.get("DRAGAPI_URL") or f"http://127.0.0.1:{os.environ.get('DRAGAPI_PORT', '8765')}"
+            try:
+                ctx[step.target] = await call_scenario(base, step.project, step.scenario,
+                                                       self.env.get(step.token_env), jsonable_encoder(params))
+            except ScenarioError as e:
+                raise StepFailure(step.node_id, 502, {"error": str(e)})
 
         elif isinstance(step, CodeStep):
             r = await sandbox.run_code(step.code, jsonable_encoder(ctx), dict(self.env),

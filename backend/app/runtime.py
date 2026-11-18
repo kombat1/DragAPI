@@ -405,6 +405,33 @@ def check_auth(scheme, expected, header_value):
     return hmac.compare_digest(str(header_value).encode(), str(expected).encode())
 
 
+class ScenarioError(Exception):
+    """Сценарий автоматизации не запустился или завершился неуспешно."""
+
+
+async def call_scenario(base_url, project, scenario, token, params, timeout=65):
+    """Блок «Запустить сценарий»: вебхук платформы DragAPI, ждём результат. -> {status, message, vars, run_id}"""
+    import httpx
+    if not token:
+        raise ScenarioError("не задан токен вебхуков сценария")
+    url = f"{str(base_url or 'http://127.0.0.1:8765').rstrip('/')}/hooks/{project}/{scenario}"
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            r = await client.post(url, params={"wait": "true", "timeout": str(timeout - 5)}, json=params,
+                                  headers={"Authorization": f"Bearer {token}"})
+    except httpx.HTTPError as e:
+        raise ScenarioError(f"платформа недоступна ({url}): {type(e).__name__}") from None
+    try:
+        data = r.json()
+    except ValueError:
+        data = {}
+    if r.status_code >= 400:
+        raise ScenarioError(f"сценарий «{scenario}»: {data.get('detail') or r.status_code}")
+    if data.get("status") not in ("ok", "running"):
+        raise ScenarioError(f"сценарий «{scenario}» завершился: {data.get('status')} — {data.get('message')}")
+    return data
+
+
 def apply_code_result(result, outputs):
     """Проверяет результат run() блока «Python-код»: dict только с объявленными полями."""
     if not isinstance(result, dict):

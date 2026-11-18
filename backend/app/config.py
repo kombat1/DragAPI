@@ -3,6 +3,7 @@
     auth = false        # без входа — только пока в платформе нет пользователей
     host = "127.0.0.1"
     port = 8765
+    local_agent = true  # агент автоматизации на этой машине (нужен графический сеанс X11)
 
 Приоритет: флаг командной строки > переменная окружения > этот файл > значение по умолчанию.
 """
@@ -14,7 +15,7 @@ import tomllib
 from pathlib import Path
 
 DEFAULT_PATH = Path(__file__).resolve().parent.parent / "dragapi.toml"
-KNOWN = {"auth": bool, "host": str, "port": int}
+KNOWN = {"auth": bool, "host": str, "port": int, "local_agent": bool}
 
 
 class ConfigError(Exception):

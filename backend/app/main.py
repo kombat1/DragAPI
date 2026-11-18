@@ -15,7 +15,7 @@ from pathlib import Path
 
 import time
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse as FastJSON, Response
 from fastapi.staticfiles import StaticFiles
@@ -23,7 +23,10 @@ from pydantic import BaseModel
 from starlette.responses import JSONResponse
 from starlette.routing import Mount, Router
 
-from . import auth, codegen, sandbox, storage, testing, vault
+import asyncio
+
+from . import auth, automation, codegen, sandbox, storage, testing, vault
+from .agents import LOCAL_ID, agent_bundle, hub
 from .config import ConfigError
 from .deploy import deployments, docker_available
 from .pyenv import envs, validate_packages
@@ -45,7 +48,20 @@ async def lifespan(_app):
     migrated = storage.migrate_secrets()
     if migrated:
         print(f"DragAPI: зашифрованы секреты в {migrated} файл(ах) проектов и истории")
+    loop = asyncio.get_running_loop()
+    hub.loop = loop
+    hub.on_network = lambda pid, events: [runner.fw_event(pid, e) for e in events]
+    hub.load_enabled()
+    await hub.start_local(loop)
+    if hub.local_agent is not None:
+        print(f"DragAPI: локальный агент автоматизации готов (аварийная остановка: "
+              f"{hub.conns[LOCAL_ID].info.get('stop_hotkey')})")
+    elif hub.local_error:
+        print(f"DragAPI: локальный агент автоматизации недоступен — {hub.local_error}")
+    hub.scheduler_task = asyncio.ensure_future(hub.scheduler())
     yield
+    hub.scheduler_task.cancel()
+    hub.stop_local()
 
 
 app = FastAPI(title="DragAPI", version="0.4.0", lifespan=lifespan)
@@ -79,6 +95,8 @@ async def access_control(request: Request, call_next):
         return FastJSON({"detail": "нужно войти"}, status_code=401)
     if path.startswith("/api/users") and not path.startswith("/api/users/brief") and user["role"] != "admin":
         return FastJSON({"detail": "только для администратора"}, status_code=403)
+    if path.startswith("/api/agents") and request.method not in ("GET", "HEAD") and user["role"] != "admin":
+        return FastJSON({"detail": "агентами управляет администратор"}, status_code=403)
     m = PROJECT_PATH.match(path)
     if m:
         role = auth.store.role_for(user, m.group(1))
@@ -291,6 +309,8 @@ runner = LiveRunner()
 
 class GraphIn(BaseModel):
     name: str
+    kind: str = "api"
+    automation: dict = {}
     nodes: list[dict] = []
     edges: list[dict] = []
     models: list[dict] = []
@@ -316,6 +336,7 @@ class TestsRunIn(BaseModel):
 
 class CreateIn(BaseModel):
     name: str = "Новый проект"
+    kind: str = "api"
 
 
 def _load(pid: str) -> dict:
@@ -326,6 +347,9 @@ def _load(pid: str) -> dict:
 
 
 def _compile(project: dict) -> CompiledProject:
+    if project.get("kind") == "automation":
+        raise HTTPException(400, {"message": "это проект-автоматизация: у него нет HTTP-API для запуска, "
+                                             "экспорта и деплоя", "issues": []})
     try:
         return compile_project(project)
     except GraphError as e:
@@ -509,7 +533,10 @@ def projects(request: Request):
 
 @app.post("/api/projects")
 def create_project(body: CreateIn, request: Request):
-    project = storage.create(body.name.strip() or "Новый проект")
+    if body.kind not in ("api", "automation"):
+        raise HTTPException(400, "тип проекта: api или automation")
+    project = storage.create(body.name.strip() or ("Новый сценарий" if body.kind == "automation" else "Новый проект"),
+                             body.kind)
     if _user(request):
         auth.store.set_owner(project["id"], _user(request)["id"])
     return project
@@ -528,14 +555,44 @@ def _with_secrets(pid: str, graph: dict) -> dict:
 def get_project(pid: str, request: Request):
     project = _load(pid)
     role = getattr(request.state, "role", None) or auth.store.role_for(_user(request), pid)
-    return {**project, "env": vault.mask_env(project.get("env")), "running": pid in runner.apps, "my_role": role}
+    return _public_project({**project, "running": pid in runner.apps, "my_role": role})
+
+
+def _public_project(project: dict) -> dict:
+    out = {**project, "env": vault.mask_env(project.get("env"))}
+    if isinstance(out.get("automation"), dict):
+        auto = dict(out["automation"])
+        auto["has_hook_token"] = bool(auto.pop("hook_token_hash", None))
+        auto.pop("enabled_by", None)
+        out["automation"] = auto
+    return out
+
+
+def _prepare_automation(pid: str, data: dict, stored: dict, user: dict | None) -> dict:
+    """Сохранение сценария: служебные поля — с сервера; включить его может только тот, кому доступен агент."""
+    if (stored.get("kind") or "api") != "automation":
+        return {**data, "kind": stored.get("kind") or "api"}
+    old = stored.get("automation") or {}
+    auto = {k: v for k, v in (data.get("automation") or {}).items() if k not in ("has_hook_token", "enabled_by",
+                                                                             "hook_token_hash")}
+    if old.get("hook_token_hash"):
+        auto["hook_token_hash"] = old["hook_token_hash"]
+    agent_id = auto.get("agent") or LOCAL_ID
+    if auto.get("enabled"):
+        if not hub.can_use(user, agent_id):
+            raise HTTPException(403, "включить сценарий может только тот, кому доступен выбранный агент")
+        auto["enabled_by"] = user["id"] if user else None
+    return {**data, "kind": "automation", "automation": auto}
 
 
 @app.put("/api/projects/{pid}")
-def save_project(pid: str, body: GraphIn):
-    _load(pid)
-    saved = storage.save(pid, body.model_dump())
-    return {**saved, "env": vault.mask_env(saved.get("env"))}
+def save_project(pid: str, body: GraphIn, request: Request):
+    stored = _load(pid)
+    data = _prepare_automation(pid, body.model_dump(), stored, _user(request))
+    saved = storage.save(pid, data)
+    if saved.get("kind") == "automation" or (stored.get("automation") or {}).get("enabled"):
+        hub.refresh_project(pid, saved)
+    return _public_project(saved)
 
 
 @app.delete("/api/projects/{pid}")
@@ -544,6 +601,7 @@ async def delete_project(pid: str):
         await deployments.stop(pid, remove_data=True)
     runner.unmount(pid)
     envs.remove(pid)
+    hub.refresh_project(pid, None)
     try:
         storage.delete(pid)
     except storage.NotFound:
@@ -565,13 +623,26 @@ def restore_version(pid: str, version: str):
         old = storage.load_version(pid, version)
     except storage.NotFound:
         raise HTTPException(404, "версия не найдена") from None
+    current = _load(pid)
+    old = {**old, "kind": current.get("kind") or "api"}
+    if old["kind"] == "automation":  # откат не включает сценарий заново от чужого имени
+        old["automation"] = {**(old.get("automation") or {}), "enabled": False,
+                             "hook_token_hash": (current.get("automation") or {}).get("hook_token_hash")}
     saved = storage.save(pid, old)
-    return {**saved, "env": vault.mask_env(saved.get("env"))}
+    hub.refresh_project(pid, saved)
+    return _public_project(saved)
 
 
 @app.post("/api/validate")
 def validate(body: GraphIn, project_id: str | None = None):
     """Проверка графа без сохранения — фронтенд вызывает её при каждом изменении."""
+    if body.kind == "automation":
+        try:
+            compiled = automation.compile_automation(body.model_dump())
+        except GraphError as e:
+            return {"ok": False, "issues": [i.as_dict() for i in e.issues]}
+        return {"ok": True, "issues": [w.as_dict() for w in compiled.warnings],
+                "scenarios": [s.trigger.as_dict() for s in compiled.scenarios]}
     try:
         compiled = compile_project(body.model_dump())
     except GraphError as e:
@@ -824,6 +895,246 @@ def export_project(pid: str, format: str = "zip"):
                                        "uvicorn main:app --reload\n```\n")
     return Response(buf.getvalue(), media_type="application/zip",
                     headers={"Content-Disposition": f'attachment; filename="{pid}.zip"'})
+
+
+# ---------- автоматизация ----------
+
+
+def _automation_project(pid: str) -> dict:
+    project = _load(pid)
+    if project.get("kind") != "automation":
+        raise HTTPException(400, "это не проект-автоматизация")
+    return project
+
+
+def _compile_automation(pid: str, graph: dict) -> automation.CompiledAutomation:
+    try:
+        return automation.compile_automation(_with_secrets(pid, graph))
+    except GraphError as e:
+        raise HTTPException(400, {"message": "в сценарии есть ошибки", "issues": [i.as_dict() for i in e.issues]})
+
+
+def _agent_for(request: Request, compiled: automation.CompiledAutomation, agent: str | None) -> str:
+    agent_id = agent or compiled.settings.agent or LOCAL_ID
+    if not hub.can_use(_user(request), agent_id):
+        raise HTTPException(403, "нет прав на этого агента")
+    return agent_id
+
+
+class AutoRunIn(BaseModel):
+    scenario: str = "main"
+    inputs: dict = {}
+    agent: str | None = None
+    graph: GraphIn | None = None     # текущий (несохранённый) граф из редактора
+
+
+class RecordIn(BaseModel):
+    agent: str | None = None
+    countdown: int = 3
+
+
+class AgentIn(BaseModel):
+    name: str = ""
+    users: list[str] | None = None
+
+
+@app.get("/api/automation/catalog")
+def automation_catalog():
+    return automation.catalog()
+
+
+@app.post("/api/projects/{pid}/automation/run")
+async def automation_run(pid: str, body: AutoRunIn, request: Request):
+    stored = _automation_project(pid)
+    graph = {**body.graph.model_dump(), "kind": "automation"} if body.graph else stored
+    compiled = _compile_automation(pid, graph)
+    agent_id = _agent_for(request, compiled, body.agent)
+    user = _user(request)
+    try:
+        run = await hub.start_run(pid, compiled, body.scenario, body.inputs, "manual",
+                                  user["id"] if user else None, agent_id)
+    except LookupError as e:
+        raise HTTPException(404, str(e)) from None
+    except ValueError as e:
+        raise HTTPException(409, str(e)) from None
+    return run.as_dict(after=0)
+
+
+@app.get("/api/projects/{pid}/automation/runs")
+def automation_runs(pid: str):
+    _automation_project(pid)
+    return [r.as_dict() for r in hub.project_history(pid)]
+
+
+@app.get("/api/projects/{pid}/automation/runs/{run_id}")
+def automation_run_status(pid: str, run_id: str, after: int = 0):
+    run = hub.get_run(pid, run_id)
+    if run is None:
+        raise HTTPException(404, "запуск не найден")
+    return run.as_dict(after=max(after, 0))
+
+
+@app.post("/api/projects/{pid}/automation/runs/{run_id}/stop")
+async def automation_run_stop(pid: str, run_id: str):
+    run = hub.get_run(pid, run_id)
+    if run is None:
+        raise HTTPException(404, "запуск не найден")
+    await hub.stop_run(run_id)
+    return {"ok": True}
+
+
+def _agent_from_project(request: Request, pid: str, agent: str | None) -> str:
+    project = _automation_project(pid)
+    agent_id = agent or (project.get("automation") or {}).get("agent") or LOCAL_ID
+    if not hub.can_use(_user(request), agent_id):
+        raise HTTPException(403, "нет прав на этого агента")
+    return agent_id
+
+
+@app.post("/api/projects/{pid}/automation/record")
+async def automation_record_start(pid: str, body: RecordIn, request: Request):
+    agent_id = _agent_from_project(request, pid, body.agent)
+    try:
+        rec = await hub.record_start(agent_id, min(max(body.countdown, 0), 10))
+    except ValueError as e:
+        raise HTTPException(409, str(e)) from None
+    rec["pid"] = pid
+    return rec
+
+
+def _recording(pid: str, rec_id: str) -> dict:
+    rec = hub.recordings.get(rec_id)
+    if rec is None or rec.get("pid") != pid:
+        raise HTTPException(404, "запись не найдена")
+    return rec
+
+
+@app.get("/api/projects/{pid}/automation/record/{rec_id}")
+def automation_record_status(pid: str, rec_id: str):
+    return _recording(pid, rec_id)
+
+
+@app.post("/api/projects/{pid}/automation/record/{rec_id}/stop")
+async def automation_record_stop(pid: str, rec_id: str):
+    _recording(pid, rec_id)
+    await hub.record_stop(rec_id)
+    return {"ok": True}
+
+
+@app.post("/api/projects/{pid}/automation/pick-point")
+async def automation_pick_point(pid: str, body: RecordIn, request: Request):
+    agent_id = _agent_from_project(request, pid, body.agent)
+    try:
+        point = await hub.pick_point(agent_id, min(max(body.countdown, 0), 10))
+    except ValueError as e:
+        raise HTTPException(409, str(e)) from None
+    point["pid"] = pid
+    return point
+
+
+@app.get("/api/projects/{pid}/automation/pick-point/{req}")
+def automation_pick_point_status(pid: str, req: str):
+    point = hub.points.get(req)
+    if point is None or point.get("pid") != pid:
+        raise HTTPException(404, "запрос не найден")
+    return point
+
+
+@app.post("/api/projects/{pid}/automation/hook-token")
+def automation_hook_token(pid: str):
+    """Новый токен вебхуков сценариев (старый перестаёт работать). Показывается один раз."""
+    import hashlib
+    import secrets as _secrets
+    project = _automation_project(pid)
+    token = "dgh_" + _secrets.token_urlsafe(32)
+    project["automation"] = {**(project.get("automation") or {}),
+                             "hook_token_hash": hashlib.sha256(token.encode()).hexdigest()}
+    storage.save(pid, project)
+    return {"token": token}
+
+
+# --- агенты ---
+
+@app.get("/api/agents")
+def agents_list(request: Request):
+    return hub.listing(_user(request))
+
+
+@app.post("/api/agents")
+def agents_create(body: AgentIn, request: Request):
+    user = _user(request)
+    rec, token = hub.create_agent(body.name, user["id"] if user else None)
+    return {"agent": rec, "token": token}
+
+
+@app.put("/api/agents/{agent_id}")
+def agents_update(agent_id: str, body: AgentIn):
+    try:
+        return hub.update_agent(agent_id, body.name or None, body.users)
+    except KeyError:
+        raise HTTPException(404, "агент не найден") from None
+
+
+@app.delete("/api/agents/{agent_id}")
+async def agents_delete(agent_id: str):
+    if agent_id == LOCAL_ID:
+        raise HTTPException(400, "локальный агент нельзя удалить — его можно выключить (local_agent = false)")
+    await hub.delete_agent(agent_id)
+    return {"ok": True}
+
+
+@app.get("/api/agents/bundle.zip")
+def agents_bundle():
+    return Response(agent_bundle(), media_type="application/zip",
+                    headers={"Content-Disposition": 'attachment; filename="dragapi-agent.zip"'})
+
+
+@app.websocket("/api/agents/ws")
+async def agents_ws(websocket: WebSocket):
+    await hub.websocket(websocket)
+
+
+# --- вебхуки сценариев (вызов из API-проектов и откуда угодно) ---
+
+@app.post("/hooks/{pid}/{name}")
+async def scenario_hook(pid: str, name: str, request: Request, wait: bool = True, timeout: float = 60):
+    """POST /hooks/<проект>/<сценарий> с Authorization: Bearer <токен вебхуков> и JSON-параметрами."""
+    import hashlib
+    import secrets as _secrets
+    try:
+        project = storage.load(pid)
+    except storage.NotFound:
+        raise HTTPException(404, "сценарий не найден") from None
+    auto = project.get("automation") or {}
+    header = request.headers.get("authorization", "")
+    token = header[7:].strip() if header.lower().startswith("bearer ") else ""
+    expected = auto.get("hook_token_hash")
+    if project.get("kind") != "automation" or not expected or not token or \
+            not _secrets.compare_digest(hashlib.sha256(token.encode()).hexdigest(), expected):
+        raise HTTPException(401, "неверный токен вебхука")
+    compiled = hub.enabled.get(pid)
+    if compiled is None:
+        raise HTTPException(409, "сценарий выключен — включите его в настройках проекта")
+    scenario = compiled.scenario(name)
+    if scenario is None or scenario.trigger.kind != "webhook":
+        raise HTTPException(404, f"нет сценария «{name}» с запуском по HTTP")
+    try:
+        inputs = await request.json() if (await request.body()) else {}
+    except ValueError:
+        raise HTTPException(400, "тело должно быть JSON-объектом") from None
+    if not isinstance(inputs, dict):
+        raise HTTPException(400, "тело должно быть JSON-объектом")
+    try:
+        run = await hub.start_run(pid, compiled, name, inputs, "webhook", hub.enabled_by.get(pid))
+    except ValueError as e:
+        raise HTTPException(409, str(e)) from None
+    if wait:
+        try:
+            await asyncio.wait_for(run.done.wait(), min(max(timeout, 1), 600))
+        except asyncio.TimeoutError:
+            return FastJSON({"run_id": run.id, "status": "running", "message": "сценарий ещё выполняется"},
+                            status_code=202)
+    return {"run_id": run.id, "status": run.status, "message": run.message, "vars": run.vars}
 
 
 app.mount("/run", runner)

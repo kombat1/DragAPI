@@ -22,6 +22,10 @@ import { LoginScreen, MembersModal, UserMenu } from './components/Auth.jsx'
 import DeployModal from './components/DeployModal.jsx'
 import { DEFAULT_FIREWALL, normalizeFirewall } from './components/FirewallTab.jsx'
 import { newId } from './components/ProjectSettings.jsx'
+import { AgentsModal, RecordModal } from './components/Automation.jsx'
+
+const BRANCH_LABELS = { true: 'да', false: 'нет', body: 'тело', done: 'дальше' }
+const isStart = (t) => t === 'endpoint' || t === 'trigger'
 
 // Переименования между двумя версиями моделей -> функция, обновляющая данные блока «База данных».
 function renameRefs(before, after) {
@@ -68,6 +72,12 @@ function producedFields(n) {
   if (n.type === 'db' && n.data.target) out.push(n.data.target)
   if (n.type === 'db' && n.data.op === 'list' && n.data.count_target) out.push(n.data.count_target)
   if (n.type === 'code') (n.data.outputs || []).forEach((o) => o && out.push(o))
+  if (n.type === 'scenario' && n.data.target) out.push(n.data.target)
+  // автоматизация: переменные сценария
+  if (n.type === 'trigger') (n.data.params || []).forEach((p) => p && out.push(p))
+  if (n.type === 'set_vars') (n.data.assignments || []).forEach((a) => a.target && out.push(a.target))
+  if ((n.type === 'repeat' || n.type === 'while') && n.data.var) out.push(n.data.var)
+  if ((n.type === 'http' || n.type === 'autoclick') && n.data.target) out.push(n.data.target)
   return out
 }
 
@@ -94,7 +104,8 @@ function fieldsBefore(nodeId, nodes, edges) {
 const cleanNode = ({ selected, dragging, measured, resizing, ...n }) => n // eslint-disable-line no-unused-vars
 const cleanEdge = ({ selected, ...e }) => e // eslint-disable-line no-unused-vars
 
-// Автораскладка: каждый эндпоинт — строка слева направо, ветки условий — друг под другом.
+// Автораскладка: каждый эндпоинт (или «Старт») — строка слева направо, ветки — друг под другом.
+const BRANCHES = { condition: ['true', 'false'], repeat: ['body', 'done'], while: ['body', 'done'] }
 function autoLayout(nodes, edges) {
   const COL = 290
   const ROW = 190
@@ -108,14 +119,16 @@ function autoLayout(nodes, edges) {
     if (pos[id]) return 1 // общий блок уже размещён
     pos[id] = { x: 40 + depth * COL, y: 40 + r * ROW }
     const next = new Set([...stack, id])
-    if (byId[id].type === 'condition') {
-      const a = place(out(id, 'true'), depth + 1, r, next)
-      const b = place(out(id, 'false'), depth + 1, r + a, next)
-      return a + b
+    const branches = BRANCHES[byId[id].type]
+    if (branches) {
+      // ветки (да/нет, тело/дальше) — друг под другом
+      let rows = 0
+      for (const b of branches) rows += place(out(id, b), depth + 1, r + rows, next)
+      return Math.max(rows, 1)
     }
     return place(out(id, null) ?? out(id), depth + 1, r, next)
   }
-  const endpoints = nodes.filter((n) => n.type === 'endpoint').sort((a, b) => a.position.y - b.position.y || a.position.x - b.position.x)
+  const endpoints = nodes.filter((n) => isStart(n.type)).sort((a, b) => a.position.y - b.position.y || a.position.x - b.position.x)
   for (const ep of endpoints) row += place(ep.id, 0, row, new Set())
   let x = 0
   for (const n of nodes) {
@@ -144,7 +157,7 @@ function hiddenByCollapse(nodes, edges) {
   const visible = new Set()
   const hidden = new Set()
   const counts = {}
-  for (const ep of nodes.filter((n) => n.type === 'endpoint')) {
+  for (const ep of nodes.filter((n) => isStart(n.type))) {
     const r = reach(ep.id)
     if (ep.data.collapsed) {
       counts[ep.id] = r.size
@@ -162,30 +175,54 @@ function Palette({ catalog }) {
   }
   return (
     <aside className="palette">
-      <div className="section-title">Блоки</div>
-      {Object.entries(catalog.blocks).map(([type, spec]) => (
-        <div
-          key={type}
-          className="palette-item"
-          draggable
-          onDragStart={(e) => onDragStart(e, type)}
-          style={{ '--accent': spec.color }}
-        >
-          <div className="palette-title">{spec.title}</div>
-          <div className="muted">{spec.description}</div>
+      {Object.entries(
+        Object.entries(catalog.blocks).reduce((acc, [type, spec]) => {
+          ;(acc[spec.group || 'Блоки'] ||= []).push([type, spec])
+          return acc
+        }, {}),
+      ).map(([group, items]) => (
+        <div key={group}>
+          <div className="section-title">{group}</div>
+          {items.map(([type, spec]) => (
+            <div
+              key={type}
+              className="palette-item"
+              draggable
+              onDragStart={(e) => onDragStart(e, type)}
+              style={{ '--accent': spec.color }}
+            >
+              <div className="palette-title">
+                {spec.icon ? `${spec.icon} ` : ''}
+                {spec.title}
+              </div>
+              <div className="muted">{spec.description}</div>
+            </div>
+          ))}
         </div>
       ))}
-      <div className="section-title">Типы связей</div>
-      {Object.entries(catalog.port_types).map(([k, v]) => (
-        <div key={k} className="muted port-type">
-          <code>{k}</code> — {v}
-        </div>
-      ))}
+      {catalog.port_types && !catalog.automation && (
+        <>
+          <div className="section-title">Типы связей</div>
+          {Object.entries(catalog.port_types).map(([k, v]) => (
+            <div key={k} className="muted port-type">
+              <code>{k}</code> — {v}
+            </div>
+          ))}
+        </>
+      )}
     </aside>
   )
 }
 
-function Editor({ catalog, projectId, onProjectsChanged, me }) {
+function Editor({ catalogs, projectId, onProjectsChanged, me }) {
+  const [kind, setKind] = useState('api')
+  const isAuto = kind === 'automation'
+  const catalog = isAuto ? catalogs.automation : catalogs.api
+  const [automation, setAutomation] = useState({})
+  const [agentsOpen, setAgentsOpen] = useState(false)
+  const [recordOpen, setRecordOpen] = useState(false)
+  const [runRequest, setRunRequest] = useState(null)
+  const [runState, setRunState] = useState(null) // текущий запуск сценария: подсветка на канвасе
   const [role, setRole] = useState('owner')
   const readOnly = role === 'viewer'
   const [membersOpen, setMembersOpen] = useState(false)
@@ -238,6 +275,10 @@ function Editor({ catalog, projectId, onProjectsChanged, me }) {
     api.project(projectId).then((p) => {
       if (cancelled) return
       setName(p.name)
+      setKind(p.kind || 'api')
+      setAutomation(p.automation || {})
+      setBottomTab(p.kind === 'automation' ? 'runs' : 'tests')
+      setRunState(null)
       setNodes(p.nodes || [])
       setEdges(p.edges || [])
       setModels(withIds(p.models || []))
@@ -264,8 +305,8 @@ function Editor({ catalog, projectId, onProjectsChanged, me }) {
   const nodesKey = JSON.stringify(nodes.map(cleanNode))
   const edgesKey = JSON.stringify(edges.map(cleanEdge))
   const graph = useMemo(
-    () => ({ name, nodes: JSON.parse(nodesKey), edges: JSON.parse(edgesKey), models, env, sandbox, libraries, firewall, tests }),
-    [name, nodesKey, edgesKey, models, env, sandbox, libraries, firewall, tests],
+    () => ({ name, kind, automation, nodes: JSON.parse(nodesKey), edges: JSON.parse(edgesKey), models, env, sandbox, libraries, firewall, tests }),
+    [name, kind, automation, nodesKey, edgesKey, models, env, sandbox, libraries, firewall, tests],
   )
 
   // живая проверка графа на бэкенде
@@ -284,10 +325,16 @@ function Editor({ catalog, projectId, onProjectsChanged, me }) {
   }, [graph, loaded, projectId, validateNonce])
 
   const save = useCallback(async () => {
-    await api.save(projectId, graph)
-    setDirty(false)
-    onProjectsChanged()
-  }, [projectId, graph, onProjectsChanged])
+    try {
+      const saved = await api.save(projectId, graph)
+      if (saved?.automation) setAutomation(saved.automation)
+      setDirty(false)
+      onProjectsChanged()
+    } catch (e) {
+      notify(`Не сохранено: ${e.message}`, 'error')
+      throw e
+    }
+  }, [projectId, graph, onProjectsChanged, notify])
 
   // Ctrl+S
   useEffect(() => {
@@ -512,6 +559,39 @@ function Editor({ catalog, projectId, onProjectsChanged, me }) {
     return () => window.removeEventListener('keydown', h)
   })
 
+  // запись действий → цепочка блоков после выделенного блока (или в конец первого сценария)
+  const insertChain = (blocks) => {
+    const byId = Object.fromEntries(nodes.map((n) => [n.id, n]))
+    const freeOut = (id) => byId[id] && !BRANCHES[byId[id].type] && byId[id].type !== 'stop' && !edges.some((e) => e.source === id)
+    let anchor = nodes.find((n) => n.selected && freeOut(n.id))?.id
+    if (!anchor) {
+      const start = nodes.find((n) => n.type === 'trigger')
+      let cur = start?.id
+      const seen = new Set()
+      while (cur && !seen.has(cur)) {
+        seen.add(cur)
+        const next = edges.find((e) => e.source === cur && !e.sourceHandle)?.target
+        if (!next) break
+        cur = next
+      }
+      anchor = cur && freeOut(cur) ? cur : null
+    }
+    const base = anchor ? byId[anchor].position : { x: 80, y: Math.max(0, ...nodes.map((n) => n.position.y)) + 220 }
+    const newNodes = blocks.map((b, i) => ({
+      id: `${b.type}-${uid()}`,
+      type: b.type,
+      position: { x: base.x + ((i % 6) + 1) * 270, y: base.y + Math.floor(i / 6) * 170 },
+      data: { ...structuredClone(catalog.blocks[b.type].defaults), ...b.data },
+      selected: true,
+    }))
+    const chainEdges = newNodes.slice(1).map((n, i) => ({ id: `e-${uid()}`, source: newNodes[i].id, target: n.id }))
+    if (anchor && newNodes.length) chainEdges.unshift({ id: `e-${uid()}`, source: anchor, target: newNodes[0].id })
+    setNodes((ns) => [...ns.map((n) => (n.selected ? { ...n, selected: false } : n)), ...newNodes])
+    setEdges((es) => [...es, ...chainEdges])
+    markDirty()
+    notify(`Вставлено блоков: ${newNodes.length}${anchor ? '' : ' — подключите цепочку к «Старту»'}`, 'ok')
+  }
+
   const arrange = () => {
     setNodes((ns) => autoLayout(ns, edges))
     markDirty()
@@ -537,6 +617,13 @@ function Editor({ catalog, projectId, onProjectsChanged, me }) {
     return m
   }, [validation])
 
+  // блоки, через которые прошёл текущий/выбранный запуск сценария
+  const runVisited = useMemo(() => new Set((runState?.events || []).map((e) => e.node).filter(Boolean)), [runState])
+  const runScenario = (scenarioName) => {
+    setBottomTab('runs')
+    setRunRequest({ name: scenarioName, nonce: Math.random() })
+  }
+
   // Ноды для отображения: добавляем проблемы и подсветку из логов, не трогая сохраняемые данные.
   // трасса тестового запроса: пройденные блоки и текущий шаг
   const debugVisited = useMemo(() => new Set((debug?.steps || []).slice(0, (debug?.current ?? -1) + 1).map((s) => s.node_id)), [debug])
@@ -559,13 +646,15 @@ function Editor({ catalog, projectId, onProjectsChanged, me }) {
         data: {
           ...n.data,
           __issues: issuesByNode[n.id],
-          __active: activeNodes.includes(n.id) || debugVisited.has(n.id),
+          __active: activeNodes.includes(n.id) || debugVisited.has(n.id) || runVisited.has(n.id),
+          __current: runState?.status === 'running' && runState.current === n.id,
           __step: debugStep && debugStep.node_id === n.id ? debugStep : null,
           __hiddenCount: collapse.counts[n.id],
-          __toggleCollapse: n.type === 'endpoint' ? () => toggleCollapse(n.id) : undefined,
+          __toggleCollapse: isStart(n.type) ? () => toggleCollapse(n.id) : undefined,
+          __run: n.type === 'trigger' && !readOnly ? () => runScenario(n.data.name) : undefined,
         },
       })),
-    [nodes, issuesByNode, activeNodes, debugVisited, debugStep, collapse, toggleCollapse],
+    [nodes, issuesByNode, activeNodes, debugVisited, debugStep, collapse, toggleCollapse, runVisited, runState, readOnly], // eslint-disable-line react-hooks/exhaustive-deps
   )
 
   // подписи «да»/«нет» на связях из условия
@@ -575,16 +664,16 @@ function Editor({ catalog, projectId, onProjectsChanged, me }) {
     const ids = (debug?.steps || []).slice(0, (debug?.current ?? -1) + 1).map((s) => s.node_id)
     for (let i = 1; i < ids.length; i++) passed.add(`${ids[i - 1]}>${ids[i]}`)
     return edges.map((e) => {
-      const branch = e.sourceHandle === 'true' || e.sourceHandle === 'false'
-      const onPath = passed.has(`${e.source}>${e.target}`)
+      const branch = !!BRANCH_LABELS[e.sourceHandle]
+      const onPath = passed.has(`${e.source}>${e.target}`) || (runVisited.has(e.source) && runVisited.has(e.target))
       return {
         ...e,
         animated: onPath,
         className: [branch ? `branch-${e.sourceHandle}` : '', onPath ? 'on-path' : ''].join(' '),
-        ...(branch ? { label: e.sourceHandle === 'true' ? 'да' : 'нет', labelBgPadding: [4, 2] } : {}),
+        ...(branch ? { label: BRANCH_LABELS[e.sourceHandle], labelBgPadding: [4, 2] } : {}),
       }
     })
-  }, [edges, debug])
+  }, [edges, debug, runVisited])
 
   const nodeTypes = useMemo(
     () => Object.fromEntries(Object.keys(catalog.blocks).map((t) => [t, BlockNode])),
@@ -596,6 +685,7 @@ function Editor({ catalog, projectId, onProjectsChanged, me }) {
   const errors = (validation.issues || []).filter((i) => i.level === 'error').length
 
   return (
+    <CatalogContext.Provider value={catalog}>
     <div className="editor">
       <header className="toolbar">
         {readOnly && <span className="readonly-badge" title="Изменения не сохраняются">👁 Только просмотр</span>}
@@ -609,8 +699,25 @@ function Editor({ catalog, projectId, onProjectsChanged, me }) {
           }}
         />
         <span className={`status ${errors ? 'bad' : 'good'}`}>
-          {errors ? `Ошибок: ${errors}` : `Граф корректен · маршрутов: ${validation.routes?.length ?? 0}`}
+          {errors
+            ? `Ошибок: ${errors}`
+            : isAuto
+              ? `Сценариев: ${validation.scenarios?.length ?? 0}`
+              : `Граф корректен · маршрутов: ${validation.routes?.length ?? 0}`}
         </span>
+        {isAuto && (
+          <button
+            className={`small auto-switch ${automation.enabled ? 'on' : ''}`}
+            disabled={readOnly}
+            title="Горячие клавиши, расписание и вебхуки работают, только когда сценарии включены (после сохранения)"
+            onClick={() => {
+              setAutomation({ ...automation, enabled: !automation.enabled })
+              markDirty()
+            }}
+          >
+            {automation.enabled ? '⏵ Включены' : '⏸ Выключены'}
+          </button>
+        )}
         <div className="spacer" />
         {!readOnly && (
           <span className="toolbar-group">
@@ -626,7 +733,7 @@ function Editor({ catalog, projectId, onProjectsChanged, me }) {
           </span>
         )}
         <button
-          onClick={() => setSettingsOpen('models')}
+          onClick={() => setSettingsOpen(isAuto ? 'automation' : 'models')}
           title="Модели данных, переменные окружения, песочница и библиотеки"
           className={(validation.issues || []).some((i) => !i.node_id) ? 'has-issues' : ''}
         >
@@ -640,10 +747,32 @@ function Editor({ catalog, projectId, onProjectsChanged, me }) {
         <button onClick={() => save().then(() => notify('Сохранено'))} disabled={!dirty || readOnly}>
           {dirty ? 'Сохранить' : 'Сохранено'}
         </button>
-        <button className="primary" onClick={run} disabled={errors > 0 || readOnly}>
-          {running ? 'Перезапустить' : '▶ Запустить'}
-        </button>
-        {running && (
+        {isAuto ? (
+          <>
+            <button onClick={() => setRecordOpen(true)} disabled={readOnly} title="Записать свои действия мышью и клавиатурой в блоки">
+              ● Запись
+            </button>
+            <button onClick={() => setAgentsOpen(true)} title="Компьютеры, на которых выполняются сценарии">
+              🖥 Агенты
+            </button>
+            <button
+              className="primary"
+              disabled={errors > 0 || readOnly || !validation.scenarios?.length}
+              onClick={() => {
+                const sel = nodes.find((n) => n.selected && n.type === 'trigger')
+                runScenario(sel?.data.name || validation.scenarios?.[0]?.name)
+              }}
+              title="Выполнить сценарий (выделенный «Старт» или первый) — текущую версию, даже несохранённую"
+            >
+              ▶ Запустить
+            </button>
+          </>
+        ) : (
+          <button className="primary" onClick={run} disabled={errors > 0 || readOnly}>
+            {running ? 'Перезапустить' : '▶ Запустить'}
+          </button>
+        )}
+        {running && !isAuto && (
           <>
             <a className="button" href={running.docs_url} target="_blank" rel="noreferrer">
               Swagger ↗
@@ -653,12 +782,16 @@ function Editor({ catalog, projectId, onProjectsChanged, me }) {
             </button>
           </>
         )}
-        <button onClick={exportZip} disabled={errors > 0} title="Скачать обычное FastAPI-приложение (с Dockerfile)">
-          Экспорт в FastAPI
-        </button>
-        <button onClick={() => setDeployOpen(true)} title="Собрать образ и запустить контейнер на этой машине">
-          🚀 Деплой
-        </button>
+        {!isAuto && (
+          <>
+            <button onClick={exportZip} disabled={errors > 0} title="Скачать обычное FastAPI-приложение (с Dockerfile)">
+              Экспорт в FastAPI
+            </button>
+            <button onClick={() => setDeployOpen(true)} title="Собрать образ и запустить контейнер на этой машине">
+              🚀 Деплой
+            </button>
+          </>
+        )}
       </header>
 
       <div className="workspace">
@@ -700,8 +833,9 @@ function Editor({ catalog, projectId, onProjectsChanged, me }) {
           sandbox={sandbox}
           firewall={firewall}
           projectId={projectId}
+          agent={automation.agent}
           sandboxInfo={sandboxInfo}
-          onOpenSettings={(tab) => setSettingsOpen(tab || 'models')}
+          onOpenSettings={(tab) => setSettingsOpen(tab || (isAuto ? 'automation' : 'models'))}
           onTestEndpoint={(id) => {
             setFocusEndpoint(null)
             setTimeout(() => setFocusEndpoint(id))
@@ -722,6 +856,18 @@ function Editor({ catalog, projectId, onProjectsChanged, me }) {
         models={models}
         tab={bottomTab}
         setTab={setBottomTab}
+        runsProps={
+          isAuto
+            ? {
+                graph,
+                scenarios: validation.scenarios || [],
+                agentId: automation.agent,
+                readOnly,
+                onRunState: setRunState,
+                runRequest,
+              }
+            : null
+        }
         testsProps={{
           graph,
           routes: validation.routes || lastRoutes.current,
@@ -739,12 +885,17 @@ function Editor({ catalog, projectId, onProjectsChanged, me }) {
         <DeployModal projectId={projectId} readOnly={readOnly} dirty={dirty} onClose={() => setDeployOpen(false)} />
       )}
       {membersOpen && <MembersModal projectId={projectId} me={me} onClose={() => setMembersOpen(false)} />}
+      {agentsOpen && <AgentsModal me={me} onClose={() => setAgentsOpen(false)} />}
+      {recordOpen && (
+        <RecordModal projectId={projectId} agentId={automation.agent} onInsert={insertChain} onClose={() => setRecordOpen(false)} />
+      )}
       {settingsOpen && (
         <ProjectSettings
           readOnly={readOnly}
           projectId={projectId}
           initialTab={settingsOpen}
-          project={{ models, env, sandbox, libraries, firewall }}
+          kind={kind}
+          project={{ models, env, sandbox, libraries, firewall, automation }}
           setProject={(patch) => {
             if (patch.models) {
               // переименования моделей и полей (по постоянным id) переносим в блоки «База данных»
@@ -756,6 +907,7 @@ function Editor({ catalog, projectId, onProjectsChanged, me }) {
             if (patch.sandbox) setSandbox(patch.sandbox)
             if (patch.libraries) setLibraries(patch.libraries)
             if (patch.firewall) setFirewall(patch.firewall)
+            if (patch.automation) setAutomation(patch.automation)
             markDirty()
           }}
           sandboxInfo={sandboxInfo}
@@ -765,6 +917,7 @@ function Editor({ catalog, projectId, onProjectsChanged, me }) {
         />
       )}
     </div>
+    </CatalogContext.Provider>
   )
 }
 
@@ -790,7 +943,8 @@ export default function App() {
 }
 
 function Workspace({ me, onLogout }) {
-  const [catalog, setCatalog] = useState(null)
+  const [catalogs, setCatalogs] = useState(null)
+  const [newOpen, setNewOpen] = useState(false)
   const [projects, setProjects] = useState([])
   const [projectId, setProjectId] = useState(() => {
     try {
@@ -813,9 +967,9 @@ function Workspace({ me, onLogout }) {
   )
 
   useEffect(() => {
-    Promise.all([api.blocks(), loadProjects()])
-      .then(([c, ps]) => {
-        setCatalog(c)
+    Promise.all([api.blocks(), api.automationCatalog(), loadProjects()])
+      .then(([c, auto, ps]) => {
+        setCatalogs({ api: c, automation: { ...auto, automation: true, port_types: { flow: 'Порядок выполнения' } } })
         setProjectId((cur) => (ps.some((p) => p.id === cur) ? cur : ps[0]?.id || null))
       })
       .catch(() => setError('Бэкенд недоступен. Запустите: cd backend && .venv/bin/uvicorn app.main:app --port 8765'))
@@ -829,12 +983,12 @@ function Workspace({ me, onLogout }) {
     }
   }, [projectId])
 
-  const createProject = async () => {
-    const name = prompt('Название проекта', 'Новый проект')
-    if (!name) return
-    const p = await api.createProject(name)
+  const createProject = () => setNewOpen(true)
+  const doCreate = async (name, kind) => {
+    const p = await api.createProject(name, kind)
     await loadProjects()
     setProjectId(p.id)
+    setNewOpen(false)
   }
 
   const deleteProject = async () => {
@@ -845,10 +999,10 @@ function Workspace({ me, onLogout }) {
   }
 
   if (error) return <div className="fatal">{error}</div>
-  if (!catalog) return <div className="fatal">Загрузка…</div>
+  if (!catalogs) return <div className="fatal">Загрузка…</div>
 
   return (
-    <CatalogContext.Provider value={catalog}>
+    <CatalogContext.Provider value={catalogs.api}>
       <div className="app">
         <nav className="topbar">
           <div className="logo">
@@ -857,6 +1011,7 @@ function Workspace({ me, onLogout }) {
           <select value={projectId || ''} onChange={(e) => setProjectId(e.target.value)}>
             {projects.map((p) => (
               <option key={p.id} value={p.id}>
+                {p.kind === 'automation' ? '🤖 ' : '🔌 '}
                 {p.name}
                 {p.role && p.role !== 'owner' ? ` (${{ editor: 'редактор', viewer: 'просмотр' }[p.role]})` : ''}
               </option>
@@ -875,14 +1030,71 @@ function Workspace({ me, onLogout }) {
         </nav>
         {projectId ? (
           <ReactFlowProvider key={`${projectId}-${reloadKey}`}>
-            <Editor catalog={catalog} projectId={projectId} onProjectsChanged={loadProjects} me={me} />
+            <Editor catalogs={catalogs} projectId={projectId} onProjectsChanged={loadProjects} me={me} />
           </ReactFlowProvider>
         ) : (
           <div className="fatal">
             Проектов пока нет. <button onClick={createProject}>Создать проект</button>
           </div>
         )}
+        {newOpen && <NewProjectModal onCreate={doCreate} onClose={() => setNewOpen(false)} />}
       </div>
     </CatalogContext.Provider>
+  )
+}
+
+function NewProjectModal({ onCreate, onClose }) {
+  const [kind, setKind] = useState('api')
+  const [name, setName] = useState('')
+  const [error, setError] = useState(null)
+  useEffect(() => {
+    const h = (e) => e.key === 'Escape' && onClose()
+    window.addEventListener('keydown', h)
+    return () => window.removeEventListener('keydown', h)
+  }, [onClose])
+  const submit = async (e) => {
+    e.preventDefault()
+    try {
+      await onCreate(name.trim() || (kind === 'automation' ? 'Новый сценарий' : 'Новый проект'), kind)
+    } catch (err) {
+      setError(err.message)
+    }
+  }
+  return (
+    <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+      <form className="modal" role="dialog" aria-label="Новый проект" onSubmit={submit}>
+        <div className="modal-head">
+          <div className="inspector-title">Новый проект</div>
+          <button type="button" className="icon" onClick={onClose}>
+            ×
+          </button>
+        </div>
+        <div className="kind-choice">
+          {[
+            ['api', '🔌 API', 'HTTP-эндпоинты, база данных, код — экспорт в FastAPI и деплой в Docker'],
+            ['automation', '🤖 Автоматизация', 'Сценарии действий на компьютере: мышь, клавиатура, автокликер, запись, расписание и горячие клавиши'],
+          ].map(([k, title, desc]) => (
+            <label key={k} className={`kind-card ${kind === k ? 'on' : ''}`}>
+              <input type="radio" name="kind" checked={kind === k} onChange={() => setKind(k)} />
+              <b>{title}</b>
+              <span className="muted">{desc}</span>
+            </label>
+          ))}
+        </div>
+        <label className="field">
+          <span className="field-label">Название</span>
+          <input autoFocus value={name} placeholder={kind === 'automation' ? 'Новый сценарий' : 'Новый проект'} onChange={(e) => setName(e.target.value)} />
+        </label>
+        {error && <div className="issue error">{error}</div>}
+        <div className="modal-foot">
+          <button type="button" onClick={onClose}>
+            Отмена
+          </button>
+          <button className="primary" type="submit">
+            Создать
+          </button>
+        </div>
+      </form>
+    </div>
   )
 }

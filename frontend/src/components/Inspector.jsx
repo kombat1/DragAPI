@@ -2,6 +2,8 @@ import { Suspense, lazy, useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { api } from '../api.js'
 import { useCatalog } from '../catalog.js'
+import AutoForm from './AutoForm.jsx'
+import { ScenarioBlockForm } from './Automation.jsx'
 
 // CodeMirror тяжёлый — грузим его, только когда открыт блок кода
 const CodeEditor = lazy(() => import('./CodeEditor.jsx'))
@@ -281,7 +283,7 @@ const AUTH_SCHEMES = {
   bearer: 'Bearer-токен (Authorization)',
 }
 
-export default function Inspector({ node, onChange, onDelete, issues, availableFields, models, env, sandbox, firewall, projectId, onOpenSettings, onTestEndpoint, sandboxInfo, readOnly = false, multiCount = 0 }) {
+export default function Inspector({ node, onChange, onDelete, issues, availableFields, models, env, sandbox, firewall, projectId, agent, onOpenSettings, onTestEndpoint, sandboxInfo, readOnly = false, multiCount = 0 }) {
   const [errorLine, setErrorLine] = useState(null)
   const [editorMode, setEditorModeState] = useState(loadEditorMode) // null | 'half' | 'full'
   const setEditorMode = (mode) => {
@@ -298,6 +300,26 @@ export default function Inspector({ node, onChange, onDelete, issues, availableF
         <p className="muted">
           <kbd>Ctrl+C</kbd> / <kbd>Ctrl+V</kbd> — копировать и вставить (можно в другой проект), <kbd>Ctrl+D</kbd> — дублировать,{' '}
           <kbd>Delete</kbd> — удалить. Связи между выделенными блоками копируются вместе с ними.
+        </p>
+      </div>
+    )
+  }
+  if (!node && catalog.automation) {
+    return (
+      <div className="inspector empty">
+        <p>Выберите блок, чтобы настроить его.</p>
+        <p className="muted">
+          Сценарий начинается с блока <b>«Старт»</b>: перетащите действия из палитры и соедините их цепочкой, например
+          <br />
+          <b>Старт → Клик → Ввести текст → Нажать клавиши</b>
+        </p>
+        <p className="muted">
+          «Повторить» и «Пока» выполняют ветку «тело» несколько раз, затем идут «дальше». Координаты удобно брать кнопкой
+          «📍 С экрана», а целые цепочки — записывать кнопкой «● Запись».
+        </p>
+        <p className="muted">
+          Безопасность: аварийная остановка — сочетание клавиш агента (по умолчанию <kbd>Ctrl+Alt+Esc</kbd>) или курсор в
+          левый верхний угол экрана.
         </p>
       </div>
     )
@@ -331,6 +353,42 @@ export default function Inspector({ node, onChange, onDelete, issues, availableF
   const model = models.find((m) => m.name === d.model)
   const modelFields = model ? model.fields.map((f) => f.name).filter(Boolean) : []
   const refFields = model ? model.fields.filter((f) => f.type === 'ref' && f.name) : []
+
+  if (spec.fields && node.type !== 'code') {
+    return (
+      <fieldset disabled={readOnly} className="inspector">
+        <div className="inspector-head" style={{ '--accent': spec.color }}>
+          <div>
+            <div className="inspector-title">
+              {spec.icon} {spec.title}
+            </div>
+            <div className="muted">{spec.description}</div>
+          </div>
+          <button className="danger small" onClick={onDelete}>
+            Удалить
+          </button>
+        </div>
+        {issues.length > 0 && (
+          <div className="issues-box">
+            {issues.map((i, k) => (
+              <div key={k} className={`issue ${i.level}`}>
+                {i.message}
+              </div>
+            ))}
+          </div>
+        )}
+        <AutoForm spec={spec} d={d} set={set} projectId={projectId} agent={agent} variables={availableFields} />
+        {availableFields.length > 0 && node.type !== 'trigger' && (
+          <div className="available">
+            <div className="field-label">Переменные на входе блока</div>
+            {availableFields.map((f) => (
+              <code key={f}>{f}</code>
+            ))}
+          </div>
+        )}
+      </fieldset>
+    )
+  }
 
   return (
     <fieldset disabled={readOnly} className={`inspector ${node.type === 'code' ? 'wide' : ''}`}>
@@ -695,6 +753,10 @@ export default function Inspector({ node, onChange, onDelete, issues, availableF
           </div>
           <CodeTester d={d} set={set} availableFields={availableFields} env={env} sandbox={sandbox} firewall={firewall} projectId={projectId} onErrorLine={setErrorLine} />
         </>
+      )}
+
+      {node.type === 'scenario' && (
+        <ScenarioBlockForm d={d} set={set} env={env} Field={Field} ListEditor={ListEditor} exprHint={EXPR_HINT} />
       )}
 
       {node.type === 'condition' && (

@@ -105,6 +105,15 @@ BLOCKS = {
         "branches": [{"id": "true", "label": "да"}, {"id": "false", "label": "нет"}],
         "defaults": {"expr": "record is None"},
     },
+    "scenario": {
+        "title": "Запустить сценарий",
+        "description": "Запускает сценарий автоматизации (на компьютере с агентом) и ждёт результат.",
+        "color": "#7c3aed",
+        "inputs": ["data"],
+        "output": ["data"],
+        "defaults": {"project": "", "scenario": "main", "params": [], "target": "scenario",
+                     "token_env": "SCENARIO_TOKEN", "url_env": "DRAGAPI_URL"},
+    },
     "response": {
         "title": "Ответ",
         "description": "Статус и JSON-тело. Пустое тело — вернуть весь контекст.",

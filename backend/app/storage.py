@@ -40,7 +40,8 @@ def list_projects() -> list[dict]:
             data = json.loads(p.read_text("utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
-        out.append({"id": p.stem, "name": data.get("name", p.stem), "updated": data.get("updated", 0)})
+        out.append({"id": p.stem, "name": data.get("name", p.stem), "updated": data.get("updated", 0),
+                    "kind": data.get("kind") or "api"})
     return sorted(out, key=lambda x: -x["updated"])
 
 
@@ -74,11 +75,17 @@ def save(pid: str, project: dict) -> dict:
     return project
 
 
-def create(name: str) -> dict:
+def create(name: str, kind: str = "api") -> dict:
     slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:40] or "project"
     pid = f"{slug}-{uuid.uuid4().hex[:6]}"
-    return save(pid, {"name": name, "nodes": [], "edges": [], "models": [], "env": [],
-                     "sandbox": {}, "libraries": {"packages": [], "only_binary": True}})
+    project = {"name": name, "kind": kind, "nodes": [], "edges": [], "models": [], "env": [],
+               "sandbox": {}, "libraries": {"packages": [], "only_binary": True}}
+    if kind == "automation":
+        project["automation"] = {"agent": "local", "enabled": False}
+        project["nodes"] = [{"id": "start", "type": "trigger", "position": {"x": 80, "y": 120},
+                             "data": {"name": "main", "kind": "manual", "hotkey": "ctrl+alt+1",
+                                      "every_seconds": "60", "at": "09:00", "weekdays": [], "params": []}}]
+    return save(pid, project)
 
 
 def delete(pid: str) -> None:

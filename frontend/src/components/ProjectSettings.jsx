@@ -3,6 +3,7 @@ import { api } from '../api.js'
 import { useCatalog } from '../catalog.js'
 import FirewallTab from './FirewallTab.jsx'
 import ListEditor from './ListEditor.jsx'
+import { AutomationTab } from './Automation.jsx'
 
 export const SETTINGS_TABS = [
   ['models', 'Модели данных'],
@@ -440,8 +441,11 @@ function LibrariesTab({ projectId, libraries, setLibraries, sandbox, onInstalled
   )
 }
 
-export default function ProjectSettings({ projectId, project, setProject, issues, sandboxInfo, onClose, onInstalled, initialTab, readOnly = false }) {
-  const [tab, setTab] = useState(initialTab || 'models')
+export default function ProjectSettings({ projectId, project, setProject, issues, sandboxInfo, onClose, onInstalled, initialTab, readOnly = false, kind = 'api' }) {
+  const tabs = kind === 'automation'
+    ? [['automation', 'Сценарий'], ...SETTINGS_TABS.filter(([k]) => k !== 'models')]
+    : SETTINGS_TABS
+  const [tab, setTab] = useState(tabs.some(([k]) => k === initialTab) ? initialTab : tabs[0][0])
 
   useEffect(() => {
     const h = (e) => e.key === 'Escape' && !e.defaultPrevented && onClose()
@@ -467,7 +471,7 @@ export default function ProjectSettings({ projectId, project, setProject, issues
           </button>
         </div>
         <div className="tabs settings-tabs">
-          {SETTINGS_TABS.map(([k, label]) => (
+          {tabs.map(([k, label]) => (
             <button key={k} className={`tab ${tab === k ? 'active' : ''}`} onClick={() => setTab(k)}>
               {label}
               {count[k] ? <span className="muted"> ({count[k]})</span> : null}
@@ -486,6 +490,13 @@ export default function ProjectSettings({ projectId, project, setProject, issues
         )}
 
         <fieldset className="settings-body" disabled={readOnly}>
+          {tab === 'automation' && (
+            <AutomationTab
+              projectId={projectId}
+              automation={project.automation}
+              setAutomation={(automation) => setProject({ automation })}
+            />
+          )}
           {tab === 'models' && (
             <ModelsTab projectId={projectId} models={project.models} setModels={(models) => setProject({ models })} />
           )}

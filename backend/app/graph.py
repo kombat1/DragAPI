@@ -147,6 +147,18 @@ class CodeStep:
 
 
 @dataclass
+class ScenarioStep:
+    node_id: str
+    project: str
+    scenario: str
+    params: list[Assignment]
+    target: str
+    token_env: str
+    url_env: str
+    kind: str = "scenario"
+
+
+@dataclass
 class ResponseSpec:
     node_id: str
     status: int
@@ -161,7 +173,7 @@ class Branch:
     otherwise: "Chain"
 
 
-Step = Union[InputStep, ValidateStep, LogicStep, AuthStep, DbStep, CodeStep]
+Step = Union[InputStep, ValidateStep, LogicStep, AuthStep, DbStep, CodeStep, ScenarioStep]
 
 
 @dataclass
@@ -595,7 +607,7 @@ class _EndpointCompiler:
             else:
                 step = {
                     "input": self._input, "validate": self._validate, "logic": self._logic,
-                    "auth": self._auth, "db": self._db, "code": self._code,
+                    "auth": self._auth, "db": self._db, "code": self._code, "scenario": self._scenario,
                 }.get(ntype, lambda *a: None)(cur, ndata, known)
                 if ntype in ("input", "auth") and step is not None:
                     self.shared_steps[cur] = step
@@ -794,48 +806,48 @@ class _EndpointCompiler:
         return step
 
     def _code(self, cur, ndata, known):
-        code = str(ndata.get("code") or "")
-        if len(code) > MAX_CODE_LEN:
-            self.fail(cur, f"код длиннее {MAX_CODE_LEN} символов")
+        step, errors, warnings = check_code_block(cur, ndata)
+        for m in errors:
+            self.fail(cur, m)
+        for m in warnings:
+            self.err_warn(cur, m)
+        if step is None:
             return None
-        try:
-            tree = ast.parse(code, "<code>")
-        except SyntaxError as e:
-            self.fail(cur, f"синтаксическая ошибка в строке {e.lineno}: {e.msg}")
-            return None
-        run = next((n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-                    and n.name == "run"), None)
-        if run is None:
-            self.fail(cur, "в коде должна быть функция run(data, env)")
-            return None
-        if isinstance(run, ast.AsyncFunctionDef):
-            self.fail(cur, "run() должна быть обычной функцией, не async")
-            return None
-        if len(run.args.args) != 2:
-            self.fail(cur, "сигнатура должна быть ровно run(data, env)")
-            return None
-        outputs: list[str] = []
-        for name in ndata.get("outputs") or []:
-            if msg := _check_ident(name, "выходное поле"):
-                self.fail(cur, msg)
-                continue
-            if name in outputs:
-                self.fail(cur, f"выходное поле «{name}» объявлено дважды")
-                continue
-            outputs.append(name)
-        if not outputs:
-            self.err_warn(cur, "не объявлено ни одного выходного поля — результат run() не будет использован")
-        try:
-            timeout = float(ndata.get("timeout") or 2)
-            memory = int(ndata.get("memory_mb") or 256)
-            if not (0.1 <= timeout <= 10 and 32 <= memory <= 1024):
-                raise ValueError
-        except (TypeError, ValueError):
-            self.fail(cur, "лимиты: время 0.1–10 с, память 32–1024 МБ")
-            return None
-        for name in outputs:
+        for name in step.outputs:
             known[name] = "any"
-        return CodeStep(cur, code, outputs, timeout, memory)
+        return step
+
+    def _scenario(self, cur, ndata, known):
+        pid = str(ndata.get("project") or "").strip()
+        name = str(ndata.get("scenario") or "").strip()
+        target = str(ndata.get("target") or "").strip()
+        token_env = str(ndata.get("token_env") or "").strip()
+        url_env = str(ndata.get("url_env") or "").strip()
+        ok = True
+        if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", pid):
+            self.fail(cur, "выберите проект-автоматизацию")
+            ok = False
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,40}", name):
+            self.fail(cur, "имя сценария: латиница, цифры, - и _")
+            ok = False
+        if msg := _check_ident(target, "поле результата"):
+            self.fail(cur, msg)
+            ok = False
+        if not ENV_KEY_RE.match(token_env):
+            self.fail(cur, "укажите переменную окружения с токеном вебхуков сценария")
+            ok = False
+        elif token_env not in self.env_keys:
+            self.err_warn(cur, f"переменной окружения {token_env} нет в проекте — добавьте её (секрет) "
+                               f"со значением токена вебхуков сценария")
+        if url_env and not ENV_KEY_RE.match(url_env):
+            self.fail(cur, "переменная с адресом платформы: латиница, цифры и _")
+            ok = False
+        params = self._assignments(cur, [{"target": p.get("key"), "expr": p.get("expr", "")}
+                                         for p in ndata.get("params") or []], known, "target", keys_are_json=True)
+        if not ok:
+            return None
+        known[target] = "any"
+        return ScenarioStep(cur, pid, name, params, target, token_env, url_env)
 
     def err_warn(self, node_id, msg):
         self.warnings.append(Issue(node_id, msg, "warning"))
@@ -890,3 +902,45 @@ class _EndpointCompiler:
             if not keys_are_json:
                 local_known[target] = "any"
         return out
+
+
+def check_code_block(cur: str, ndata: dict) -> tuple[CodeStep | None, list[str], list[str]]:
+    """Проверка блока «Python-код» (общая для API-проектов и сценариев): шаг, ошибки, предупреждения."""
+    errors: list[str] = []
+    warnings: list[str] = []
+    code = str(ndata.get("code") or "")
+    if len(code) > MAX_CODE_LEN:
+        return None, [f"код длиннее {MAX_CODE_LEN} символов"], warnings
+    try:
+        tree = ast.parse(code, "<code>")
+    except SyntaxError as e:
+        return None, [f"синтаксическая ошибка в строке {e.lineno}: {e.msg}"], warnings
+    run = next((n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and n.name == "run"), None)
+    if run is None:
+        return None, ["в коде должна быть функция run(data, env)"], warnings
+    if isinstance(run, ast.AsyncFunctionDef):
+        return None, ["run() должна быть обычной функцией, не async"], warnings
+    if len(run.args.args) != 2:
+        return None, ["сигнатура должна быть ровно run(data, env)"], warnings
+    outputs: list[str] = []
+    for name in ndata.get("outputs") or []:
+        if msg := _check_ident(name, "выходное поле"):
+            errors.append(msg)
+            continue
+        if name in outputs:
+            errors.append(f"выходное поле «{name}» объявлено дважды")
+            continue
+        outputs.append(name)
+    if not outputs:
+        warnings.append("не объявлено ни одного выходного поля — результат run() не будет использован")
+    try:
+        timeout = float(ndata.get("timeout") or 2)
+        memory = int(ndata.get("memory_mb") or 256)
+        if not (0.1 <= timeout <= 10 and 32 <= memory <= 1024):
+            raise ValueError
+    except (TypeError, ValueError):
+        return None, errors + ["лимиты: время 0.1–10 с, память 32–1024 МБ"], warnings
+    if errors:
+        return None, errors, warnings
+    return CodeStep(cur, code, outputs, timeout, memory), errors, warnings

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import TestsPanel from './TestsPanel.jsx'
 import { api } from '../api.js'
 import { NetworkEvents } from './Inspector.jsx'
+import { RunsPanel } from './Automation.jsx'
 
 const fmtTime = (t) => new Date(t * 1000).toLocaleTimeString()
 
@@ -227,7 +228,7 @@ function loadHeight() {
 
 export default function BottomPanel({
   projectId, running, issues, onSelectNode, onHighlight, onRestored, models,
-  tab, setTab, testsProps,
+  tab, setTab, testsProps, runsProps,
 }) {
   const [collapsed, setCollapsed] = useState(false)
   const [height, setHeight] = useState(loadHeight)
@@ -262,13 +263,20 @@ export default function BottomPanel({
     <section className={`bottom-panel ${collapsed ? 'collapsed' : ''}`} style={collapsed ? undefined : { height }}>
       {!collapsed && <div className="resize-handle" onPointerDown={startResize} title="Потяните, чтобы изменить высоту" />}
       <div className="tabs">
-        {[
-          ['tests', `Тесты${testsProps.tests.length ? ` (${testsProps.tests.length})` : ''}`],
-          ['issues', `Проблемы${issues.length ? ` (${issues.length})` : ''}`],
-          ['logs', `Логи${running ? ' ●' : ''}`],
-          ['data', `Данные${models?.length ? ` (${models.length})` : ''}`],
-          ['versions', 'История'],
-        ].map(([k, label]) => (
+        {(runsProps
+          ? [
+              ['runs', 'Запуски'],
+              ['issues', `Проблемы${issues.length ? ` (${issues.length})` : ''}`],
+              ['versions', 'История версий'],
+            ]
+          : [
+              ['tests', `Тесты${testsProps.tests.length ? ` (${testsProps.tests.length})` : ''}`],
+              ['issues', `Проблемы${issues.length ? ` (${issues.length})` : ''}`],
+              ['logs', `Логи${running ? ' ●' : ''}`],
+              ['data', `Данные${models?.length ? ` (${models.length})` : ''}`],
+              ['versions', 'История'],
+            ]
+        ).map(([k, label]) => (
           <button
             key={k}
             className={`tab ${tab === k ? 'active' : ''} ${k === 'issues' && errors ? 'bad' : ''}`}
@@ -284,7 +292,12 @@ export default function BottomPanel({
       </div>
       {!collapsed && (
         <div className="tab-body">
-          {tab === 'tests' && <TestsPanel projectId={projectId} {...testsProps} />}
+          {tab === 'tests' && !runsProps && <TestsPanel projectId={projectId} {...testsProps} />}
+          {runsProps && (
+            <div style={{ display: tab === 'runs' ? undefined : 'none', height: '100%' }}>
+              <RunsPanel projectId={projectId} onSelectNode={onSelectNode} {...runsProps} />
+            </div>
+          )}
           {tab === 'issues' &&
             (issues.length ? (
               issues.map((i, k) => (

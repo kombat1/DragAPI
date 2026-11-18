@@ -3,6 +3,7 @@ import { StepDetails } from './TestsPanel.jsx'
 
 const OPS = { eq: '=', ne: '≠', gt: '>', gte: '≥', lt: '<', lte: '≤', contains: '∋', startswith: '^', in: '∈', is_null: '∅' }
 import { useCatalog } from '../catalog.js'
+import { autoSummary } from './AutoForm.jsx'
 
 function Summary({ type, data }) {
   switch (type) {
@@ -106,6 +107,22 @@ function Summary({ type, data }) {
           если <code className="expr">{data.expr}</code>
         </div>
       )
+    case 'scenario':
+      return (
+        <>
+          <div className="row-line">
+            🤖 <code>{data.scenario || '—'}</code> <span className="muted">{data.project || 'проект не выбран'}</span>
+          </div>
+          {(data.params || []).slice(0, 3).map((p, i) => (
+            <div key={i} className="row-line">
+              <code>{p.key}</code> = <code className="expr">{p.expr}</code>
+            </div>
+          ))}
+          <div className="muted">
+            → <code>{data.target}</code>
+          </div>
+        </>
+      )
     case 'response':
       return (
         <>
@@ -134,7 +151,7 @@ export default function BlockNode({ id, type, data, selected }) {
   const level = issues.some((i) => i.level === 'error') ? 'error' : issues.length ? 'warning' : ''
   return (
     <div
-      className={`block ${selected ? 'selected' : ''} ${level} ${data.__active ? 'active' : ''} ${data.__step ? 'current-step' : ''}`}
+      className={`block ${selected ? 'selected' : ''} ${level} ${data.__active ? 'active' : ''} ${data.__step || data.__current ? 'current-step' : ''}`}
       style={{ '--accent': spec.color }}
       title={issues.map((i) => i.message).join('\n')}
     >
@@ -147,11 +164,26 @@ export default function BlockNode({ id, type, data, selected }) {
         <Handle type="target" position={Position.Left} title={`вход: ${spec.inputs.join(' | ')}`} />
       )}
       <div className="block-head">
-        {spec.title}
+        <span className="block-title">
+          {spec.icon ? <span className="block-icon">{spec.icon}</span> : null}
+          {spec.title}
+        </span>
+        {data.__run && (
+          <button
+            className="collapse-toggle nodrag"
+            title="Запустить этот сценарий"
+            onClick={(e) => {
+              e.stopPropagation()
+              data.__run()
+            }}
+          >
+            ▶
+          </button>
+        )}
         {data.__toggleCollapse && (
           <button
             className="collapse-toggle nodrag"
-            title={data.collapsed ? 'Развернуть цепочку' : 'Свернуть цепочку эндпоинта'}
+            title={data.collapsed ? 'Развернуть цепочку' : 'Свернуть цепочку'}
             onClick={(e) => {
               e.stopPropagation()
               data.__toggleCollapse()
@@ -162,7 +194,7 @@ export default function BlockNode({ id, type, data, selected }) {
         )}
       </div>
       <div className="block-body">
-        <Summary type={type} data={data} />
+        {spec.fields ? <div className="row-line auto-summary">{autoSummary(type, data)}</div> : <Summary type={type} data={data} />}
       </div>
       {issues.length > 0 && <div className={`block-issue ${level}`}>{issues[0].message}</div>}
       {spec.branches

@@ -13,6 +13,11 @@ def _test_secret_key(monkeypatch, tmp_path):
     from app import auth
     monkeypatch.setenv("DRAGAPI_SECRET_KEY", Fernet.generate_key().decode())
     monkeypatch.setenv("DRAGAPI_AUTH", "off")
+    monkeypatch.setenv("DRAGAPI_LOCAL_AGENT", "off")   # тесты не трогают настоящие мышь и клавиатуру
+    from app import agents, main
+    test_hub = agents.AgentHub(tmp_path / "agents")
+    monkeypatch.setattr(agents, "hub", test_hub)
+    monkeypatch.setattr(main, "hub", test_hub)
     monkeypatch.setattr(auth, "store", auth.AuthStore(tmp_path / "auth"))
     vault.reset_cache()
     yield
