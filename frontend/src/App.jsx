@@ -592,6 +592,19 @@ function Editor({ catalogs, projectId, onProjectsChanged, me }) {
     notify(`Вставлено блоков: ${newNodes.length}${anchor ? '' : ' — подключите цепочку к «Старту»'}`, 'ok')
   }
 
+  // очистить полотно: все блоки и связи (Ctrl+Z возвращает; на диск — только после сохранения)
+  const clearCanvas = () => {
+    if (!nodes.length) return
+    if (!confirm(`Удалить все блоки (${nodes.length}) и связи с полотна? Отменить — Ctrl+Z; на диск изменение попадёт после сохранения.`)) return
+    setNodes([])
+    setEdges([])
+    setDebug(null)
+    setRunState(null)
+    setActiveNodes([])
+    markDirty()
+    notify('Полотно очищено — Ctrl+Z, чтобы вернуть')
+  }
+
   const arrange = () => {
     setNodes((ns) => autoLayout(ns, edges))
     markDirty()
@@ -729,6 +742,9 @@ function Editor({ catalogs, projectId, onProjectsChanged, me }) {
             </button>
             <button className="small" onClick={arrange} title="Расставить блоки: эндпоинт — строка, ветки — друг под другом">
               ⊞ Упорядочить
+            </button>
+            <button className="small" onClick={clearCanvas} disabled={!nodes.length} title="Удалить все блоки и связи (можно отменить Ctrl+Z)">
+              🗑 Очистить
             </button>
           </span>
         )}
