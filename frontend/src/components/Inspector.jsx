@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 import { api } from '../api.js'
 import { useCatalog } from '../catalog.js'
 import AutoForm from './AutoForm.jsx'
+import { HelpButton } from './ExprHelp.jsx'
 import { ScenarioBlockForm } from './Automation.jsx'
 
 // CodeMirror тяжёлый — грузим его, только когда открыт блок кода
@@ -242,10 +243,15 @@ function CodeTester({ d, set, availableFields, env, sandbox, firewall, projectId
   )
 }
 
-function Field({ label, children, hint }) {
+function Field({ label, children, hint, help }) {
+  // у полей, где пишут выражения, — кнопка справки
+  const withHelp = help ?? (typeof hint === 'string' && hint.includes(EXPR_HINT) ? <HelpButton kind="expr" /> : null)
   return (
     <div className="field">
-      <div className="field-label">{label}</div>
+      <div className="field-label">
+        {label}
+        {withHelp}
+      </div>
       {children}
       {hint && <div className="hint">{hint}</div>}
     </div>

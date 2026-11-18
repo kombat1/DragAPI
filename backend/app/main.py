@@ -957,6 +957,13 @@ class AgentIn(BaseModel):
     users: list[str] | None = None
 
 
+@app.get("/api/expr/docs")
+def expr_docs():
+    """Справка по выражениям для кнопки «?» (примеры проверены тестами)."""
+    from .exprdocs import docs
+    return docs()
+
+
 @app.get("/api/automation/catalog")
 def automation_catalog():
     return automation.catalog()

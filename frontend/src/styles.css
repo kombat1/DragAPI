@@ -428,3 +428,32 @@ kbd { font-family: var(--mono); font-size: 11px; padding: 0 4px; border: 1px sol
 .emu-keyboard { display: flex; flex-direction: column; gap: 4px; }
 .emu-kb-row { display: flex; gap: 4px; }
 .emu-kb-row button { flex: 1; }
+
+/* ---------- справка по выражениям ---------- */
+.help-btn { margin-left: 6px; width: 18px; height: 18px; padding: 0; border-radius: 50%; font-size: 11px; font-weight: 700; line-height: 16px;
+  color: var(--primary); border-color: color-mix(in srgb, var(--primary) 45%, var(--border)); vertical-align: middle; }
+.help-btn:hover { background: color-mix(in srgb, var(--primary) 12%, var(--panel)); }
+.help-modal { width: min(1100px, calc(100vw - 32px)); max-height: calc(100vh - 48px); display: flex; flex-direction: column; }
+.help-toolbar { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin: 6px 0 10px; }
+.help-toolbar input:not([type=checkbox]) { flex: 1; min-width: 220px; }
+.help-toolbar .check { display: inline-flex; gap: 4px; align-items: center; font-size: 12px; }
+.help-layout { display: flex; gap: 14px; min-height: 0; flex: 1; }
+.help-nav { flex: 0 0 200px; display: flex; flex-direction: column; gap: 2px; overflow-y: auto; }
+.help-nav button { text-align: left; border: none; background: transparent; padding: 4px 8px; border-radius: 6px; }
+.help-nav button:hover { background: var(--code-bg); }
+.help-body { flex: 1; overflow-y: auto; padding-right: 6px; }
+.help-body section { margin-bottom: 18px; }
+.help-body h3 { margin: 4px 0 6px; font-size: 14px; }
+.help-text { margin: 4px 0 8px; line-height: 1.5; }
+.help-example { border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; margin-bottom: 6px; display: flex; flex-direction: column; gap: 3px; }
+.help-code { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+.help-code code { font-size: 12.5px; }
+.help-result { color: var(--ok); font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 12px; }
+.help-actions { display: flex; gap: 6px; }
+.help-table td { vertical-align: top; }
+.help-wrong { color: var(--danger); text-decoration: line-through; }
+.available code.clickable { cursor: pointer; }
+@media (max-width: 700px) {
+  .help-layout { flex-direction: column; }
+  .help-nav { flex: none; flex-direction: row; flex-wrap: wrap; }
+}

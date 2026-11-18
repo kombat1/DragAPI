@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { api } from '../api.js'
 import ListEditor from './ListEditor.jsx'
+import { HelpButton } from './ExprHelp.jsx'
 import { AutomationProjectSelect, ButtonsInput, LinksInput } from './Bots.jsx'
 
 // Форма блока автоматизации строится по описанию полей из каталога (backend: app/automation.py).
@@ -109,10 +110,13 @@ function PickPoint({ projectId, agent, onPick }) {
   )
 }
 
-function Field({ label, children, hint }) {
+function Field({ label, children, hint, help }) {
   return (
     <div className="field">
-      <div className="field-label">{label}</div>
+      <div className="field-label">
+        {label}
+        {help}
+      </div>
       {children}
       {hint && <div className="hint">{hint}</div>}
     </div>
@@ -256,7 +260,7 @@ function FieldInput({ f, d, set, variables, roles }) {
       )
     case 'assignments':
       return (
-        <Field label={f.label} hint={EXPR_HINT}>
+        <Field label={f.label} hint={EXPR_HINT} help={<HelpButton kind="expr" variables={variables} />}>
           <ListEditor
             items={value || []}
             onChange={put}
@@ -272,7 +276,7 @@ function FieldInput({ f, d, set, variables, roles }) {
       )
     case 'kv':
       return (
-        <Field label={f.label} hint={EXPR_HINT}>
+        <Field label={f.label} hint={EXPR_HINT} help={<HelpButton kind="expr" variables={variables} />}>
           <ListEditor
             items={value || []}
             onChange={put}
@@ -306,7 +310,7 @@ function FieldInput({ f, d, set, variables, roles }) {
       )
     case 'template':
       return (
-        <Field label={f.label} hint={f.hint || TEMPLATE_HINT}>
+        <Field label={f.label} hint={f.hint || TEMPLATE_HINT} help={<HelpButton kind="template" onInsert={put} variables={variables} />}>
           {f.multiline ? (
             <textarea className="mono" rows={3} value={value ?? ''} onChange={(e) => put(e.target.value)} />
           ) : (
@@ -320,6 +324,7 @@ function FieldInput({ f, d, set, variables, roles }) {
         <Field
           label={f.label}
           hint={f.hint || (f.kind === 'expr' ? `Истина/ложь. ${variables?.length ? 'Переменные: ' + variables.join(', ') : ''}` : '')}
+          help={<HelpButton kind="expr" onInsert={put} variables={variables} />}
         >
           <input className="mono" value={value ?? ''} onChange={(e) => put(e.target.value)} />
         </Field>

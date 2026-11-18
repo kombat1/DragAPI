@@ -86,6 +86,7 @@ export const api = {
   botPayments: (pid) => request('GET', `/api/projects/${pid}/bot/payments`),
   botUsersClear: (pid) => request('DELETE', `/api/projects/${pid}/bot/users`),
   // автоматизация
+  exprDocs: () => request('GET', '/api/expr/docs'),
   automationCatalog: () => request('GET', '/api/automation/catalog'),
   autoRun: (pid, body) => request('POST', `/api/projects/${pid}/automation/run`, body),
   autoRuns: (pid) => request('GET', `/api/projects/${pid}/automation/runs`),
