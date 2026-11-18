@@ -61,6 +61,7 @@ async def lifespan(_app):
     hub.scheduler_task = asyncio.ensure_future(hub.scheduler())
     yield
     hub.scheduler_task.cancel()
+    hub.telegram.stop_all()
     hub.stop_local()
 
 
@@ -311,6 +312,7 @@ class GraphIn(BaseModel):
     name: str
     kind: str = "api"
     automation: dict = {}
+    telegram: dict = {}
     nodes: list[dict] = []
     edges: list[dict] = []
     models: list[dict] = []
@@ -1051,6 +1053,49 @@ def automation_hook_token(pid: str):
                              "hook_token_hash": hashlib.sha256(token.encode()).hexdigest()}
     storage.save(pid, project)
     return {"token": token}
+
+
+class TelegramTestIn(BaseModel):
+    telegram: dict = {}
+    env: list[dict] = []
+    send: bool = True
+
+
+@app.post("/api/projects/{pid}/telegram/check")
+async def telegram_check(pid: str, body: TelegramTestIn):
+    """«Проверить бота»: имя бота, недавние чаты (чтобы добавить их в разрешённые) и пробное сообщение."""
+    from . import telegram as tg
+    _automation_project(pid)
+    env = _with_secrets(pid, {"env": body.env})["env"]
+    token_env = str(body.telegram.get("token_env") or "")
+    token = next((e.get("value") for e in env if e.get("key") == token_env), "")
+    if not token:
+        raise HTTPException(400, {"message": f"переменная {token_env or '(не выбрана)'} пуста — задайте токен бота", "issues": []})
+    out = {"username": None, "chats": [], "sent": [], "errors": [], "polling": hub.telegram.status(token)}
+    try:
+        out["username"] = (await tg.call(token, "getMe")).get("username")
+    except tg.TelegramError as e:
+        raise HTTPException(400, {"message": f"Telegram: {e}", "issues": []}) from None
+    if out["polling"]:
+        out["chats"] = out["polling"]["seen_chats"]
+    else:  # бота сейчас никто не опрашивает — смотрим недавние сообщения, не подтверждая их
+        try:
+            seen = {}
+            for upd in await tg.call(token, "getUpdates", timeout=0) or []:  # timeout=0: не ждать
+                chat = ((upd.get("message") or {}).get("chat")) or {}
+                if chat.get("id") is not None:
+                    seen[str(chat["id"])] = chat.get("title") or chat.get("first_name") or chat.get("username") or ""
+            out["chats"] = [{"id": k, "title": v} for k, v in seen.items()]
+        except tg.TelegramError as e:
+            out["errors"].append(str(e))
+    if body.send:
+        for chat in body.telegram.get("chats") or []:
+            try:
+                await hub.telegram.send(token, str(chat), "✅ DragAPI: бот подключён к проекту. Команды — /list")
+                out["sent"].append(str(chat))
+            except tg.TelegramError as e:
+                out["errors"].append(f"{chat}: {e}")
+    return out
 
 
 # --- агенты ---

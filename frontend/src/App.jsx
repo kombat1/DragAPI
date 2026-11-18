@@ -105,7 +105,7 @@ const cleanNode = ({ selected, dragging, measured, resizing, ...n }) => n // esl
 const cleanEdge = ({ selected, ...e }) => e // eslint-disable-line no-unused-vars
 
 // Автораскладка: каждый эндпоинт (или «Старт») — строка слева направо, ветки — друг под другом.
-const BRANCHES = { condition: ['true', 'false'], repeat: ['body', 'done'], while: ['body', 'done'] }
+const BRANCHES = { condition: ['true', 'false'], tg_ask: ['true', 'false'], repeat: ['body', 'done'], while: ['body', 'done'] }
 function autoLayout(nodes, edges) {
   const COL = 290
   const ROW = 190
@@ -219,6 +219,7 @@ function Editor({ catalogs, projectId, onProjectsChanged, me }) {
   const isAuto = kind === 'automation'
   const catalog = isAuto ? catalogs.automation : catalogs.api
   const [automation, setAutomation] = useState({})
+  const [telegram, setTelegram] = useState({})
   const [agentsOpen, setAgentsOpen] = useState(false)
   const [recordOpen, setRecordOpen] = useState(false)
   const [runRequest, setRunRequest] = useState(null)
@@ -277,6 +278,7 @@ function Editor({ catalogs, projectId, onProjectsChanged, me }) {
       setName(p.name)
       setKind(p.kind || 'api')
       setAutomation(p.automation || {})
+      setTelegram(p.telegram || {})
       setBottomTab(p.kind === 'automation' ? 'runs' : 'tests')
       setRunState(null)
       setNodes(p.nodes || [])
@@ -305,8 +307,8 @@ function Editor({ catalogs, projectId, onProjectsChanged, me }) {
   const nodesKey = JSON.stringify(nodes.map(cleanNode))
   const edgesKey = JSON.stringify(edges.map(cleanEdge))
   const graph = useMemo(
-    () => ({ name, kind, automation, nodes: JSON.parse(nodesKey), edges: JSON.parse(edgesKey), models, env, sandbox, libraries, firewall, tests }),
-    [name, kind, automation, nodesKey, edgesKey, models, env, sandbox, libraries, firewall, tests],
+    () => ({ name, kind, automation, telegram, nodes: JSON.parse(nodesKey), edges: JSON.parse(edgesKey), models, env, sandbox, libraries, firewall, tests }),
+    [name, kind, automation, telegram, nodesKey, edgesKey, models, env, sandbox, libraries, firewall, tests],
   )
 
   // живая проверка графа на бэкенде
@@ -911,7 +913,7 @@ function Editor({ catalogs, projectId, onProjectsChanged, me }) {
           projectId={projectId}
           initialTab={settingsOpen}
           kind={kind}
-          project={{ models, env, sandbox, libraries, firewall, automation }}
+          project={{ models, env, sandbox, libraries, firewall, automation, telegram }}
           setProject={(patch) => {
             if (patch.models) {
               // переименования моделей и полей (по постоянным id) переносим в блоки «База данных»
@@ -924,6 +926,7 @@ function Editor({ catalogs, projectId, onProjectsChanged, me }) {
             if (patch.libraries) setLibraries(patch.libraries)
             if (patch.firewall) setFirewall(patch.firewall)
             if (patch.automation) setAutomation(patch.automation)
+            if (patch.telegram) setTelegram(patch.telegram)
             markDirty()
           }}
           sandboxInfo={sandboxInfo}

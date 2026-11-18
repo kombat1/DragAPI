@@ -425,6 +425,21 @@ class Runner:
             if key in result:
                 self.vars[key] = result[key]
 
+    def op_telegram(self, s):
+        self._server("tg_send", {"text": self.text(s.get("text"), "текст")[:4000]})
+
+    def op_tg_ask(self, s):
+        timeout = self.num(s.get("timeout"), "ожидание ответа", minimum=5, maximum=86400, default=300)
+        reply = self._server("tg_ask", {"text": self.text(s.get("text"), "вопрос")[:4000], "timeout": timeout,
+                                        "_timeout": timeout}) or {}
+        answer = reply.get("answer")
+        if s.get("target"):
+            self.vars[s["target"]] = answer
+        self.emit({"type": "log", "node": self.node, "message":
+                   "ответа нет — ветка «нет»" if answer is None else
+                   f"ответ: {'да' if answer else 'нет'}{' (' + reply['by'] + ')' if reply.get('by') else ''}"})
+        self.block(s["then"] if answer else s["else"])
+
     def op_http(self, s):
         payload = {"url": self.text(s.get("url"), "адрес")}
         body = {}

@@ -20,7 +20,11 @@ from .graph import EnvVar, GraphError, Issue, _check_ident, _compile_env, check_
 from .pyenv import validate_packages
 from .sandbox import SandboxSettings
 
-TRIGGER_KINDS = ["manual", "hotkey", "interval", "daily", "webhook"]
+TRIGGER_KINDS = ["manual", "hotkey", "interval", "daily", "webhook", "telegram"]
+TG_COMMAND_RE = re.compile(r"^[a-z0-9_]{1,32}$")
+TG_CHAT_RE = re.compile(r"^-?\d{1,20}$")
+TG_BUILTIN = {"start", "help", "list", "status", "stop", "id"}
+TG_NOTIFY = ["never", "errors", "always"]
 WEEKDAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 BUTTONS = ["left", "right", "middle"]
 TEMPLATE_RE = re.compile(r"\{\{|\}\}|\{([^{}]+)\}")
@@ -45,19 +49,23 @@ AUTO_BLOCKS: dict[str, dict] = {
         "description": "Начало сценария: вручную, по горячей клавише, по расписанию или по вызову из API.",
         "inputs": [], "output": ["flow"],
         "defaults": {"name": "main", "kind": "manual", "hotkey": "ctrl+alt+1", "every_seconds": "60",
-                     "at": "09:00", "weekdays": [], "params": []},
+                     "at": "09:00", "weekdays": [], "params": [], "command": ""},
         "fields": [
             F(key="name", label="Имя сценария", kind="text", hint="Латиница, цифры, - и _; по нему сценарий вызывают из API"),
             F(key="kind", label="Запуск", kind="select", options=[
                 ["manual", "Только вручную"], ["hotkey", "Горячая клавиша"], ["interval", "Каждые N секунд"],
-                ["daily", "Каждый день в…"], ["webhook", "Вызов по HTTP (из API-проекта)"]]),
+                ["daily", "Каждый день в…"], ["webhook", "Вызов по HTTP (из API-проекта)"],
+                ["telegram", "Команда Telegram-бота"]]),
+            F(key="command", label="Команда бота", kind="text", show_if={"kind": ["telegram"]},
+              hint="Латиница в нижнем регистре, цифры и _: например click → в чате /click. Параметры: "
+                   "/click n=5 или /click 5"),
             F(key="hotkey", label="Сочетание клавиш", kind="keys", show_if={"kind": ["hotkey"]}),
             F(key="every_seconds", label="Интервал, с", kind="text", show_if={"kind": ["interval"]},
               hint="Не меньше 5 секунд"),
             F(key="at", label="Время (ЧЧ:ММ)", kind="text", show_if={"kind": ["daily"]}),
             F(key="weekdays", label="Дни недели", kind="weekdays", show_if={"kind": ["daily"]},
               hint="Ничего не выбрано — каждый день"),
-            F(key="params", label="Входные параметры", kind="strings", show_if={"kind": ["webhook", "manual"]},
+            F(key="params", label="Входные параметры", kind="strings", show_if={"kind": ["webhook", "manual", "telegram"]},
               hint="Имена полей, которые передают при запуске; в сценарии — переменные"),
         ],
     },
@@ -210,6 +218,32 @@ AUTO_BLOCKS: dict[str, dict] = {
         "fields": [F(key="status", label="Результат", kind="select", options=[["ok", "Успех"], ["error", "Ошибка"]]),
                    F(key="message", label="Сообщение", kind="template", optional=True)],
     },
+    "telegram": {
+        "title": "Telegram: сообщение", "group": "Telegram", "color": "#229ED9", "icon": "✈",
+        "description": "Отправить сообщение через бота проекта (настройки → Telegram). {выражения} подставляются.",
+        "inputs": ["flow"], "output": ["flow"],
+        "defaults": {"text": "Сценарий дошёл до шага {i}", "chat": "", "silent": False},
+        "fields": [F(key="text", label="Текст", kind="template", multiline=True),
+                   F(key="chat", label="ID чата", kind="text", optional=True,
+                     hint="Пусто — во все разрешённые чаты из настроек"),
+                   F(key="silent", label="Без звука", kind="bool")],
+    },
+    "tg_ask": {
+        "title": "Спросить в Telegram", "group": "Telegram", "color": "#229ED9", "icon": "❓",
+        "description": "Сообщение с кнопками; сценарий ждёт ответа и идёт по ветке «да» или «нет» (и по таймауту).",
+        "inputs": ["flow"], "output": ["flow"],
+        "branches": [{"id": "true", "label": "да"}, {"id": "false", "label": "нет"}],
+        "defaults": {"text": "Продолжить?", "yes": "Да", "no": "Нет", "timeout": "300", "chat": "", "target": "answer"},
+        "fields": [F(key="text", label="Вопрос", kind="template", multiline=True),
+                   F(key="yes", label="Кнопка «да»", kind="text"),
+                   F(key="no", label="Кнопка «нет»", kind="text"),
+                   F(key="timeout", label="Ждать ответа, с", kind="num",
+                     hint="Нет ответа — ветка «нет». Не дольше лимита времени запуска."),
+                   F(key="chat", label="ID чата", kind="text", optional=True,
+                     hint="Пусто — во все разрешённые чаты; засчитывается первый ответ"),
+                   F(key="target", label="Ответ — в переменную", kind="text", optional=True,
+                     hint="True / False, или None при таймауте")],
+    },
     "code": {
         "title": "Python-код", "group": "Данные", "color": "#0f766e", "icon": "🐍",
         "description": "run(data, env) в песочнице платформы; data — переменные сценария.",
@@ -260,11 +294,12 @@ class Trigger:
     at: str | None = None
     weekdays: list[str] = field(default_factory=list)
     params: list[str] = field(default_factory=list)
+    command: str | None = None
 
     def as_dict(self) -> dict:
         return {"node": self.node, "name": self.name, "kind": self.kind, "hotkey": self.hotkey,
                 "every_seconds": self.every_seconds, "at": self.at, "weekdays": self.weekdays,
-                "params": self.params}
+                "params": self.params, "command": self.command}
 
 
 @dataclass
@@ -310,6 +345,37 @@ class AutomationSettings:
 
 
 @dataclass
+class TelegramSettings:
+    token_env: str = ""
+    chats: list[str] = field(default_factory=list)
+    notify: str = "errors"          # never | errors | always — сообщать о завершении запусков
+
+    @classmethod
+    def parse(cls, raw: Any, env_keys: set[str], err) -> "TelegramSettings":
+        raw = raw if isinstance(raw, dict) else {}
+        s = cls(token_env=str(raw.get("token_env") or "").strip(), notify=raw.get("notify") or "errors")
+        if s.token_env and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", s.token_env):
+            err(None, "Telegram: имя переменной с токеном — латиница, цифры и _")
+        elif s.token_env and s.token_env not in env_keys:
+            err(None, f"Telegram: в переменных проекта нет {s.token_env} — добавьте её (секрет) с токеном бота")
+        for c in raw.get("chats") or []:
+            c = str(c).strip()
+            if not c:
+                continue
+            if not TG_CHAT_RE.match(c):
+                err(None, f"Telegram: ID чата «{c}» — это число (у групп — отрицательное)")
+            elif c not in s.chats:
+                s.chats.append(c)
+        if s.notify not in TG_NOTIFY:
+            err(None, "Telegram: уведомления — never, errors или always")
+        return s
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.token_env)
+
+
+@dataclass
 class CompiledAutomation:
     name: str
     scenarios: list[Scenario]
@@ -320,10 +386,18 @@ class CompiledAutomation:
     packages: list[str]
     only_binary: bool
     firewall: FirewallSettings
+    telegram: TelegramSettings = field(default_factory=TelegramSettings)
 
     @property
     def env_values(self) -> dict[str, str]:
         return {e.key: e.value for e in self.env}
+
+    @property
+    def telegram_token(self) -> str:
+        return self.env_values.get(self.telegram.token_env, "") if self.telegram.token_env else ""
+
+    def telegram_commands(self) -> dict[str, Scenario]:
+        return {s.trigger.command: s for s in self.scenarios if s.trigger.kind == "telegram" and s.trigger.command}
 
     def scenario(self, name: str) -> Scenario | None:
         return next((s for s in self.scenarios if s.trigger.name == name), None)
@@ -355,6 +429,7 @@ def compile_automation(graph: dict) -> CompiledAutomation:
 
     env = _compile_env(graph.get("env"), err)
     settings = AutomationSettings.parse(graph.get("automation"), err)
+    telegram = TelegramSettings.parse(graph.get("telegram"), {e.key for e in env}, err)
     sandbox_settings, sandbox_errors = SandboxSettings.parse(graph.get("sandbox"))
     libraries = graph.get("libraries") or {}
     packages, package_errors = validate_packages(libraries.get("packages"))
@@ -392,6 +467,7 @@ def compile_automation(graph: dict) -> CompiledAutomation:
     scenarios: list[Scenario] = []
     names_seen: dict[str, str] = {}
     hotkeys_seen: dict[str, str] = {}
+    commands_seen: dict[str, str] = {}
     for nid, n in nodes.items():
         if n.get("type") != "trigger":
             continue
@@ -401,13 +477,21 @@ def compile_automation(graph: dict) -> CompiledAutomation:
             trig = None
         if trig is not None:
             names_seen[trig.name] = nid
+            if trig.command:
+                if trig.command in commands_seen:
+                    err(nid, f"команда /{trig.command} уже занята другим сценарием")
+                commands_seen[trig.command] = nid
+                if not telegram.configured:
+                    err(nid, "запуск из Telegram: укажите бота в «Настройки проекта → Telegram»")
+                elif not telegram.chats:
+                    warn(nid, "в настройках Telegram нет разрешённых чатов — команды никто не сможет отправить")
             if trig.hotkey:
                 combo = "+".join(trig.hotkey)
                 if combo in hotkeys_seen:
                     err(nid, f"сочетание {combo} уже занято другим сценарием")
                 hotkeys_seen[combo] = nid
         # цепочку проверяем, даже если сам «Старт» с ошибкой, — чтобы показать все ошибки сразу
-        walker = _Walker(nodes, outgoing, reached, err, warn)
+        walker = _Walker(nodes, outgoing, reached, err, warn, telegram)
         reached.add(nid)
         steps = walker.walk(outgoing.get((nid, None)), frozenset({nid}), None)
         if steps is None or trig is None or not walker.ok:
@@ -429,7 +513,8 @@ def compile_automation(graph: dict) -> CompiledAutomation:
     if not any(n.get("type") == "trigger" for n in nodes.values()):
         warnings.append(Issue(None, "в проекте нет ни одного блока «Старт»", "warning"))
     return CompiledAutomation(str(graph.get("name") or ""), scenarios, env, settings, warnings,
-                              sandbox_settings, packages, bool(libraries.get("only_binary", True)), firewall)
+                              sandbox_settings, packages, bool(libraries.get("only_binary", True)), firewall,
+                              telegram)
 
 
 def _trigger(nid: str, data: dict, err) -> Trigger | None:
@@ -468,6 +553,12 @@ def _trigger(nid: str, data: dict, err) -> Trigger | None:
         if not TIME_RE.match(t.at):
             fail("время запуска: формат ЧЧ:ММ, например 09:30")
         t.weekdays = [d for d in data.get("weekdays") or [] if d in WEEKDAYS]
+    if kind == "telegram":
+        t.command = str(data.get("command") or "").strip().lstrip("/").lower()
+        if not TG_COMMAND_RE.match(t.command):
+            fail("команда бота: латиница в нижнем регистре, цифры и _ (до 32 символов)")
+        elif t.command in TG_BUILTIN:
+            fail(f"/{t.command} — встроенная команда бота, выберите другое имя")
     for p in data.get("params") or []:
         if msg := _check_ident(p, "входной параметр"):
             fail(msg)
@@ -479,7 +570,8 @@ def _trigger(nid: str, data: dict, err) -> Trigger | None:
 
 
 class _Walker:
-    def __init__(self, nodes, outgoing, reached, err, warn):
+    def __init__(self, nodes, outgoing, reached, err, warn, telegram=None):
+        self.telegram = telegram or TelegramSettings()
         self.nodes, self.outgoing, self.reached = nodes, outgoing, reached
         self.err, self.warn = err, warn
         self.budget = MAX_STEPS
@@ -513,12 +605,13 @@ class _Walker:
             if ntype == "trigger":
                 self.fail(cur, "«Старт» может быть только началом сценария")
                 return None
-            if ntype == "condition":
+            if ntype in ("condition", "tg_ask"):
                 step = self._step(cur, ntype, data)
                 then = self.walk(self.outgoing.get((cur, "true")), frozenset(path), loop)
                 other = self.walk(self.outgoing.get((cur, "false")), frozenset(path), loop)
                 if step is not None and then is not None and other is not None:
-                    steps.append({**step, "op": "if", "then": then, "else": other})
+                    op = "if" if ntype == "condition" else "tg_ask"
+                    steps.append({**step, "op": op, "then": then, "else": other})
                 return steps   # продолжение — внутри веток
             if ntype in ("repeat", "while"):
                 step = self._step(cur, ntype, data)
@@ -633,6 +726,18 @@ class _Walker:
                 step = {"op": "code", "node": nid, "outputs": code_step.outputs}
                 self.code[nid] = {"code": code_step.code, "outputs": code_step.outputs,
                                   "timeout": code_step.timeout, "memory_mb": code_step.memory_mb}
+        if ntype in ("telegram", "tg_ask"):
+            if not self.telegram.configured:
+                fail("бот не настроен: «Настройки проекта → Telegram»")
+            chat = step.get("chat") or ""
+            if chat and not TG_CHAT_RE.match(chat):
+                fail("ID чата — число (у групп — отрицательное)")
+            elif chat and self.telegram.chats and chat not in self.telegram.chats:
+                fail(f"чат {chat} не в списке разрешённых (настройки → Telegram)")
+            elif not chat and not self.telegram.chats:
+                fail("нет разрешённых чатов: добавьте их в «Настройки проекта → Telegram» или укажите ID чата")
+            if ntype == "tg_ask" and (not str(step.get("yes", "")).strip() or not str(step.get("no", "")).strip()):
+                fail("подписи кнопок не должны быть пустыми")
         if ntype == "http":
             try:
                 timeout = float(str(data.get("timeout") or 10))

@@ -479,3 +479,148 @@ def test_api_block_runs_scenario(monkeypatch):
                                                token_env="SCENARIO_TOKEN"), g["nodes"][3]]}
     with pytest.raises(GraphError, match="проект-автоматизацию"):
         compile_project(g3)
+
+
+# --- Telegram: поддельный Bot API ---
+
+class FakeTelegram:
+    def __init__(self):
+        self.updates, self.sent, self.calls = [], [], []
+        self.next_id = 1
+
+    def push(self, update):
+        update["update_id"] = self.next_id
+        self.next_id += 1
+        self.updates.append(update)
+
+    def message(self, chat, text):
+        self.push({"message": {"chat": {"id": int(chat), "first_name": "Тест"}, "text": text}})
+
+    def texts(self, chat):
+        return [m["text"] for m in self.sent if str(m["chat_id"]) == str(chat)]
+
+    async def handler(self, request):
+        import asyncio as _a
+        import httpx
+        method = request.url.path.rsplit("/", 1)[-1]
+        body = _json.loads(request.content or b"{}")
+        self.calls.append((method, body))
+        if "/botBAD" in request.url.path:
+            return httpx.Response(401, json={"ok": False, "description": "Unauthorized"})
+        if method == "getMe":
+            return httpx.Response(200, json={"ok": True, "result": {"username": "dragapi_test_bot"}})
+        if method == "getUpdates":
+            offset = body.get("offset") or 0
+            pending = [u for u in self.updates if u["update_id"] >= offset]
+            if not pending and body.get("timeout"):
+                await _a.sleep(0.05)
+            return httpx.Response(200, json={"ok": True, "result": pending})
+        if method == "sendMessage":
+            self.sent.append(body)
+            return httpx.Response(200, json={"ok": True, "result": {"message_id": len(self.sent)}})
+        return httpx.Response(200, json={"ok": True, "result": True})
+
+
+def test_telegram_parsing():
+    from app.telegram import parse_args, parse_command
+    assert parse_command("/Greet@MyBot who=Мир n=5") == ("greet", "who=Мир n=5")
+    assert parse_command("привет") is None
+    assert parse_args("who=Мир n=5", ["who", "n"]) == {"who": "Мир", "n": 5}
+    assert parse_args("Мир 5", ["who", "n"]) == {"who": "Мир", "n": 5}
+    assert parse_args("Привет, мир!", ["text"]) == {"text": "Привет, мир!"}
+    assert parse_args("", ["who"]) == {}
+
+
+def test_telegram_compile_rules():
+    base = {"env": [{"key": "TG", "value": "x", "secret": True}]}
+    g = {**base, "nodes": [node("s", "trigger", name="m", kind="telegram", command="stop"),
+                           node("t", "telegram", text="hi")], "edges": [edge("s", "t")]}
+    with pytest.raises(GraphError) as e:
+        compile_automation(g)
+    text = " ".join(i.message for i in e.value.issues)
+    assert "встроенная команда" in text and "бот не настроен" in text
+    g["telegram"] = {"token_env": "TG", "chats": ["111", "abc"]}
+    g["nodes"][0]["data"]["command"] = "go"
+    with pytest.raises(GraphError, match="ID чата «abc»"):
+        compile_automation(g)
+    g["telegram"]["chats"] = ["111"]
+    p = compile_automation(g)
+    assert list(p.telegram_commands()) == ["go"] and p.telegram_token == "x"
+    g["telegram"]["token_env"] = "NOPE"
+    with pytest.raises(GraphError, match="нет NOPE"):
+        compile_automation(g)
+
+
+def test_telegram_bot_controls_scenarios(tmp_path, monkeypatch):
+    import httpx
+
+    from app import telegram as tg
+    fake = FakeTelegram()
+    monkeypatch.setattr(tg, "TRANSPORT", httpx.MockTransport(fake.handler))
+    monkeypatch.setattr(storage, "DATA_DIR", tmp_path / "projects")
+    monkeypatch.setattr(storage, "DB_DIR", tmp_path / "db")
+    with TestClient(platform_main.app, headers={"X-DragAPI": "1"}) as client:
+        created = client.post("/api/agents", json={"name": "ПК"}).json()
+        pid = client.post("/api/projects", json={"name": "Бот", "kind": "automation"}).json()["id"]
+        graph = {"name": "Бот", "kind": "automation",
+                 "automation": {"agent": created["agent"]["id"], "enabled": True},
+                 "env": [{"key": "TG_TOKEN", "value": "123:abc", "secret": True}],
+                 "telegram": {"token_env": "TG_TOKEN", "chats": ["111"], "notify": "errors"},
+                 "nodes": [node("s", "trigger", name="greet", kind="telegram", command="greet", params=["who"]),
+                           node("msg", "telegram", text="Привет, {who}!"),
+                           node("ask", "tg_ask", text="Продолжить?", yes="Да", no="Нет", timeout="20", target="ok"),
+                           node("y", "set_vars", assignments=[{"target": "res", "expr": "1"}]),
+                           node("n", "set_vars", assignments=[{"target": "res", "expr": "0"}])],
+                 "edges": [edge("s", "msg"), edge("msg", "ask"), edge("ask", "y", "true"), edge("ask", "n", "false")]}
+        r = client.put(f"/api/projects/{pid}", json=graph)
+        assert r.status_code == 200, r.text
+        driver = FakeDriver()
+        agent, ctx = _connect_agent(client, created["token"], driver)
+        try:
+            _wait(lambda: client.get("/api/agents").json()[0]["online"])
+            _wait(lambda: any(m == "setMyCommands" for m, _ in fake.calls))
+            cmds = next(b for m, b in fake.calls if m == "setMyCommands")["commands"]
+            assert "greet" in [c["command"] for c in cmds]
+
+            fake.message(999, "/greet who=Чужой")                 # чужой чат — только его ID
+            _wait(lambda: fake.texts(999))
+            assert "ID этого чата: 999" in fake.texts(999)[0] and "не в списке" in fake.texts(999)[0]
+            fake.message(111, "/list")
+            _wait(lambda: fake.texts(111))
+            assert "/greet <who>" in fake.texts(111)[-1]
+
+            fake.message(111, "/greet who=Мир")
+            ask = _wait(lambda: next((m for m in fake.sent if m.get("reply_markup")), None))
+            assert "▶ Запускаю «greet»…" in fake.texts(111) and "Привет, Мир!" in fake.texts(111)
+            buttons = ask["reply_markup"]["inline_keyboard"][0]
+            assert [b["text"] for b in buttons] == ["Да", "Нет"]
+            # кнопка из чужого чата не засчитывается
+            fake.push({"callback_query": {"id": "c0", "data": buttons[0]["callback_data"], "from": {"first_name": "Злоумышленник"},
+                                          "message": {"chat": {"id": 999}}}})
+            time.sleep(0.3)
+            assert not any(t.startswith("✅") for t in fake.texts(111))
+            fake.push({"callback_query": {"id": "c1", "data": buttons[0]["callback_data"], "from": {"first_name": "Аня"},
+                                          "message": {"chat": {"id": 111}}}})
+            done = _wait(lambda: next((t for t in fake.texts(111) if t.startswith("✅")), None))
+            assert "«greet»: готово" in done and "res = 1" in done and "ok = true" in done
+            edited = [b for m, b in fake.calls if m == "editMessageText"]
+            assert edited and "✔ Да — Аня" in edited[-1]["text"]
+            runs = client.get(f"/api/projects/{pid}/automation/runs").json()
+            assert runs[0]["source"] == "telegram" and runs[0]["vars"]["res"] == 1
+
+            # /status и /stop
+            fake.message(111, "/status")
+            _wait(lambda: any("ничего не выполняется" in t for t in fake.texts(111)))
+
+            # проверка бота из настроек
+            chk = client.post(f"/api/projects/{pid}/telegram/check",
+                              json={"telegram": graph["telegram"], "env": graph["env"], "send": True}).json()
+            assert chk["username"] == "dragapi_test_bot" and chk["sent"] == ["111"]
+            assert {"id": "111", "title": "Тест"} in chk["chats"] and chk["polling"]["running"]
+
+            # выключили проект — бот перестаёт опрашиваться
+            graph["automation"]["enabled"] = False
+            client.put(f"/api/projects/{pid}", json=graph)
+            _wait(lambda: not platform_main.hub.telegram.pollers)
+        finally:
+            ctx.__exit__(None, None, None)

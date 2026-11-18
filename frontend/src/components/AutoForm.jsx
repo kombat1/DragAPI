@@ -293,6 +293,7 @@ export function autoSummary(type, d) {
           interval: `каждые ${d.every_seconds} с`,
           daily: `в ${d.at}${(d.weekdays || []).length ? ` (${d.weekdays.length} дн.)` : ' ежедневно'}`,
           webhook: 'по HTTP',
+          telegram: `✈ /${d.command || '…'}`,
         }[d.kind] + ` · «${d.name}»`
       )
     case 'mouse_move':
@@ -329,6 +330,10 @@ export function autoSummary(type, d) {
       return d.status === 'error' ? `ошибка${d.message ? `: ${d.message}` : ''}` : 'успех'
     case 'http':
       return `${d.method} ${d.url} → ${d.target}`
+    case 'telegram':
+      return `«${String(d.text || '').slice(0, 40)}»${d.chat ? ` → ${d.chat}` : ''}`
+    case 'tg_ask':
+      return `${String(d.text || '').slice(0, 30)} [${d.yes} / ${d.no}] ⌛${d.timeout} с`
     default:
       return ''
   }

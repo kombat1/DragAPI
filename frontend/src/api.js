@@ -84,6 +84,7 @@ export const api = {
   recordStop: (pid, recId) => request('POST', `/api/projects/${pid}/automation/record/${recId}/stop`),
   pickPoint: (pid, body) => request('POST', `/api/projects/${pid}/automation/pick-point`, body),
   pickPointStatus: (pid, req) => request('GET', `/api/projects/${pid}/automation/pick-point/${req}`),
+  telegramCheck: (pid, body) => request('POST', `/api/projects/${pid}/telegram/check`, body),
   hookToken: (pid) => request('POST', `/api/projects/${pid}/automation/hook-token`),
   agents: () => request('GET', '/api/agents'),
   createAgent: (name) => request('POST', '/api/agents', { name }),

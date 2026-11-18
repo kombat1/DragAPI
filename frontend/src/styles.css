@@ -379,3 +379,6 @@ kbd { font-family: var(--mono); font-size: 11px; padding: 0 4px; border: 1px sol
   .runs { flex-direction: column; }
   .runs-side { flex: none; }
 }
+.chips { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.chips .chip button { border: none; background: none; padding: 0 0 0 4px; color: inherit; }
+.chat-input { width: 160px; }

@@ -9,7 +9,7 @@ const STATUS = {
   stopped: ['■ остановлен', 'bad'],
   skipped: ['пропущен', 'bad'],
 }
-const SOURCE = { manual: 'вручную', hotkey: 'клавиша', schedule: 'расписание', webhook: 'вебхук' }
+const SOURCE = { manual: 'вручную', hotkey: 'клавиша', schedule: 'расписание', webhook: 'вебхук', telegram: 'Telegram' }
 const fmtTime = (t) => (t ? new Date(t * 1000).toLocaleTimeString() : '')
 
 export function useAgents(deps = []) {
@@ -585,5 +585,161 @@ export function ScenarioBlockForm({ d, set, env, Field, ListEditor, exprHint }) 
       </datalist>
       <div className="hint">Сценарии проекта должны быть включены. Если сценарий не завершится успешно, эндпоинт ответит 502.</div>
     </>
+  )
+}
+
+// ---------- вкладка «Telegram» в настройках проекта-автоматизации ----------
+
+export function TelegramTab({ projectId, telegram, setTelegram, env, setEnv, enabled }) {
+  const t = { token_env: '', chats: [], notify: 'errors', ...telegram }
+  const set = (patch) => setTelegram({ ...t, ...patch })
+  const [check, setCheck] = useState(null)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState(null)
+  const envKeys = env.map((e) => e.key).filter(Boolean)
+  const tokenVar = env.find((e) => e.key === t.token_env)
+
+  const addTokenVar = () => {
+    const key = 'TELEGRAM_BOT_TOKEN'
+    if (!env.some((e) => e.key === key)) setEnv([...env, { key, value: '', secret: true }])
+    set({ token_env: key })
+  }
+  const runCheck = async (send) => {
+    setBusy(true)
+    setError(null)
+    try {
+      setCheck(await api.telegramCheck(projectId, { telegram: t, env, send }))
+    } catch (e) {
+      setError(e.message)
+    } finally {
+      setBusy(false)
+    }
+  }
+  const addChat = (id) => !t.chats.includes(id) && set({ chats: [...t.chats, id] })
+
+  return (
+    <section>
+      <p className="hint">
+        Бот запускает сценарии командами (<code>/команда</code> у «Старта» с запуском «Команда Telegram-бота»), присылает
+        сообщения из блоков «Telegram» и задаёт вопросы с кнопками. Платформа сама опрашивает Telegram — публичный адрес
+        не нужен. Команды принимаются, только когда сценарии включены, и только из разрешённых чатов.
+      </p>
+      <ol className="hint">
+        <li>
+          Создайте бота у <a href="https://t.me/BotFather" target="_blank" rel="noreferrer">@BotFather</a> (<code>/newbot</code>) и
+          скопируйте токен.
+        </li>
+        <li>Сохраните токен в секретную переменную (ниже) и напишите боту любое сообщение, например <code>/id</code>.</li>
+        <li>«Проверить бота» покажет, кто ему писал, — добавьте свой чат в разрешённые.</li>
+      </ol>
+      <div className="list-row">
+        <label className="field">
+          <span className="field-label">Токен бота — секретная переменная</span>
+          <select value={t.token_env} onChange={(e) => set({ token_env: e.target.value })}>
+            <option value="">— бот не подключён —</option>
+            {envKeys.map((k) => (
+              <option key={k} value={k}>
+                {k}
+              </option>
+            ))}
+          </select>
+        </label>
+        {!envKeys.includes('TELEGRAM_BOT_TOKEN') && (
+          <button className="small" onClick={addTokenVar} title="Добавить секретную переменную TELEGRAM_BOT_TOKEN">
+            + переменная TELEGRAM_BOT_TOKEN
+          </button>
+        )}
+      </div>
+      {tokenVar && (
+        <label className="field">
+          <span className="field-label">Токен (хранится зашифрованным)</span>
+          <input
+            type="password"
+            className="mono"
+            autoComplete="off"
+            value={tokenVar.value || ''}
+            placeholder={tokenVar.has_value ? '•••••• задан — введите новый, чтобы заменить' : '123456789:AA…'}
+            onChange={(e) => setEnv(env.map((x) => (x.key === t.token_env ? { ...x, value: e.target.value, secret: true } : x)))}
+          />
+        </label>
+      )}
+      {tokenVar && !tokenVar.secret && <div className="issue warning">Переменная {t.token_env} не помечена секретом — токен будет храниться открыто.</div>}
+      <div className="field">
+        <div className="field-label">Разрешённые чаты (ID)</div>
+        <div className="chips">
+          {t.chats.map((c) => (
+            <span key={c} className="chip on">
+              {c}
+              <button className="icon" title="Убрать" onClick={() => set({ chats: t.chats.filter((x) => x !== c) })}>
+                ×
+              </button>
+            </span>
+          ))}
+          <input
+            className="mono chat-input"
+            placeholder="ID чата + Enter"
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && e.target.value.trim()) {
+                e.preventDefault()
+                addChat(e.target.value.trim())
+                e.target.value = ''
+              }
+            }}
+          />
+        </div>
+        <div className="hint">Только эти чаты могут запускать сценарии и отвечать на вопросы. У групп ID отрицательный.</div>
+      </div>
+      <label className="field">
+        <span className="field-label">Сообщать о завершении запусков</span>
+        <select value={t.notify} onChange={(e) => set({ notify: e.target.value })}>
+          <option value="never">Никогда</option>
+          <option value="errors">Только об ошибках и пропусках</option>
+          <option value="always">О каждом запуске</option>
+        </select>
+      </label>
+      <div className="tester-actions">
+        <button onClick={() => runCheck(false)} disabled={busy || !t.token_env}>
+          {busy ? 'Проверка…' : 'Проверить бота'}
+        </button>
+        <button onClick={() => runCheck(true)} disabled={busy || !t.token_env || !t.chats.length} title="Отправить тестовое сообщение в разрешённые чаты">
+          Отправить тест
+        </button>
+        {!enabled && <span className="muted">команды заработают, когда сценарии включены и проект сохранён</span>}
+      </div>
+      <div className="hint">Токен для проверки берётся из поля выше или из сохранённого проекта.</div>
+      {error && <div className="issue error">{error}</div>}
+      {check && (
+        <div className="test-result ok">
+          <div>
+            Бот <b>@{check.username}</b>
+            {check.polling ? (check.polling.running ? ' · опрос работает' : ' · опрос остановлен') : ' · сейчас не опрашивается'}
+            {check.polling?.error && <span className="issue error"> {check.polling.error}</span>}
+          </div>
+          {check.sent.length > 0 && <div>✓ тестовое сообщение отправлено: {check.sent.join(', ')}</div>}
+          {check.errors.map((e, i) => (
+            <div key={i} className="issue error">
+              {e}
+            </div>
+          ))}
+          <div className="field-label">Кто писал боту</div>
+          {check.chats.length ? (
+            check.chats.map((c) => (
+              <div key={c.id} className="row-line">
+                <code>{c.id}</code> {c.title}{' '}
+                {t.chats.includes(c.id) ? (
+                  <span className="muted">разрешён</span>
+                ) : (
+                  <button className="small" onClick={() => addChat(c.id)}>
+                    + разрешить
+                  </button>
+                )}
+              </div>
+            ))
+          ) : (
+            <div className="muted">Никто — напишите боту сообщение и проверьте ещё раз.</div>
+          )}
+        </div>
+      )}
+    </section>
   )
 }

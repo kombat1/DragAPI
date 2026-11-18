@@ -227,14 +227,15 @@ class Agent:
             with self.lock:
                 self.pending[req] = item
             self.send({"type": "op", "run_id": run_id, "req": req, "op": op, "node": node, "payload": payload})
-            deadline = time.monotonic() + OP_TIMEOUT
+            # шаги вроде «Спросить в Telegram» ждут человека — дольше обычного
+            deadline = time.monotonic() + max(OP_TIMEOUT, float(payload.get("_timeout") or 0) + 15)
             try:
                 while not item[0].wait(0.05):
                     if stop.is_set():
                         from .runner import Stopped
                         raise Stopped("остановлено")
                     if time.monotonic() > deadline:
-                        raise RuntimeError("сервер платформы не ответил за 60 с")
+                        raise RuntimeError("сервер платформы не ответил вовремя")
             finally:
                 with self.lock:
                     self.pending.pop(req, None)

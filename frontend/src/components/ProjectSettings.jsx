@@ -3,7 +3,7 @@ import { api } from '../api.js'
 import { useCatalog } from '../catalog.js'
 import FirewallTab from './FirewallTab.jsx'
 import ListEditor from './ListEditor.jsx'
-import { AutomationTab } from './Automation.jsx'
+import { AutomationTab, TelegramTab } from './Automation.jsx'
 
 export const SETTINGS_TABS = [
   ['models', 'Модели данных'],
@@ -443,7 +443,7 @@ function LibrariesTab({ projectId, libraries, setLibraries, sandbox, onInstalled
 
 export default function ProjectSettings({ projectId, project, setProject, issues, sandboxInfo, onClose, onInstalled, initialTab, readOnly = false, kind = 'api' }) {
   const tabs = kind === 'automation'
-    ? [['automation', 'Сценарий'], ...SETTINGS_TABS.filter(([k]) => k !== 'models')]
+    ? [['automation', 'Сценарий'], ['telegram', 'Telegram'], ...SETTINGS_TABS.filter(([k]) => k !== 'models')]
     : SETTINGS_TABS
   const [tab, setTab] = useState(tabs.some(([k]) => k === initialTab) ? initialTab : tabs[0][0])
 
@@ -495,6 +495,16 @@ export default function ProjectSettings({ projectId, project, setProject, issues
               projectId={projectId}
               automation={project.automation}
               setAutomation={(automation) => setProject({ automation })}
+            />
+          )}
+          {tab === 'telegram' && (
+            <TelegramTab
+              projectId={projectId}
+              telegram={project.telegram}
+              setTelegram={(telegram) => setProject({ telegram })}
+              env={project.env}
+              setEnv={(env) => setProject({ env })}
+              enabled={!!project.automation?.enabled}
             />
           )}
           {tab === 'models' && (

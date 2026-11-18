@@ -109,6 +109,8 @@ class Run:
     vars: dict = field(default_factory=dict)
     actions: int = 0
     compiled: CompiledAutomation | None = None
+    reply_chat: str | None = None      # запуск командой из Telegram — итог отправить туда
+    tg: dict | None = None             # бот проекта: {token, chats, notify}
     done: asyncio.Event = field(default_factory=asyncio.Event)
 
     def as_dict(self, after: int | None = None) -> dict:
@@ -141,6 +143,8 @@ class AgentHub:
         self.local_error: str | None = None
         self.scheduler_task: asyncio.Task | None = None
         self.on_network = None   # (pid, events) -> None — журнал firewall
+        from .telegram import TelegramManager
+        self.telegram = TelegramManager(self)
 
     # ---------- реестр удалённых агентов ----------
 
@@ -411,6 +415,12 @@ class AgentHub:
         if conn is not None and conn.run_id == run.id:
             conn.run_id = None
         run.done.set()
+        self.telegram.cancel_run(run.id)
+        self._notify(run)
+
+    def _notify(self, run: Run):
+        if run.tg and (run.reply_chat or run.tg["notify"] != "never"):
+            self._spawn(self.telegram.notify_finished(run, run.tg["token"], run.tg["chats"], run.tg["notify"]))
 
     async def _server_op(self, conn: Conn, run: Run, msg: dict):
         req = msg.get("req")
@@ -441,6 +451,25 @@ class AgentHub:
             if not r.ok:
                 raise RuntimeError(f"Python-код: {r.error}")
             return apply_code_result(r.result, spec["outputs"])
+        if op in ("tg_send", "tg_ask"):
+            step = _find_step(scenario.steps if scenario else [], node)
+            if step is None:
+                raise RuntimeError("нет такого Telegram-блока в сценарии")
+            token = project.telegram_token
+            if not token:
+                raise RuntimeError(f"не задан токен бота (переменная {project.telegram.token_env or '—'})")
+            chats = [step["chat"]] if step.get("chat") else list(project.telegram.chats)
+            from .telegram import TelegramError
+            try:
+                if op == "tg_send":
+                    sent = await self.telegram.send_many(token, chats, str(payload.get("text") or ""),
+                                                         bool(step.get("silent")))
+                    return {"sent": sent}
+                timeout = min(float(payload.get("timeout") or 300), 86400)
+                return await self.telegram.ask(token, chats, str(payload.get("text") or ""), step.get("yes") or "Да",
+                                               step.get("no") or "Нет", timeout, run.id)
+            except TelegramError as e:
+                raise RuntimeError(f"Telegram: {e}") from None
         if op == "http":
             spec = scenario.http.get(node) if scenario else None
             if spec is None:
@@ -471,7 +500,7 @@ class AgentHub:
         return self.history.setdefault(pid, deque(maxlen=HISTORY))
 
     async def start_run(self, pid: str, compiled: CompiledAutomation, name: str, inputs: dict, source: str,
-                        user_id: str | None, agent_id: str | None = None) -> Run:
+                        user_id: str | None, agent_id: str | None = None, reply_chat: str | None = None) -> Run:
         """Запустить сценарий. Ошибки «нельзя» — ValueError (сообщение для пользователя)."""
         scenario = compiled.scenario(name)
         if scenario is None:
@@ -479,6 +508,9 @@ class AgentHub:
         agent_id = agent_id or compiled.settings.agent or LOCAL_ID
         run = Run("run-" + uuid.uuid4().hex[:10], pid, name, agent_id, source, user_id,
                   {k: v for k, v in inputs.items() if k in scenario.trigger.params})
+        if compiled.telegram.configured and compiled.telegram_token:
+            run.tg = {"token": compiled.telegram_token, "chats": list(compiled.telegram.chats),
+                      "notify": compiled.telegram.notify}
         history = self.project_history(pid)
         conn = self.conns.get(agent_id)
         problem = None
@@ -496,7 +528,10 @@ class AgentHub:
             run.status, run.message, run.finished = "skipped", problem, time.time()
             run.done.set()
             history.appendleft(run)
+            if source in ("hotkey", "schedule", "webhook"):   # ручной и telegram-запуск сообщают сами
+                self._notify(run)
             raise ValueError(problem)
+        run.reply_chat = reply_chat
         run.compiled = compiled
         conn.run_id = run.id
         self.runs[run.id] = run
@@ -543,6 +578,8 @@ class AgentHub:
             del self.next_due[key]
         for agent_id in {old_agent, compiled.settings.agent if compiled else None} - {None}:
             self._spawn(self.push_hotkeys(agent_id))
+        if self.loop is not None:
+            self.telegram.sync()
 
     def _spawn(self, coro):
         """Запустить корутину в цикле сервера — и из него самого, и из потока (синхронные эндпоинты)."""
@@ -660,6 +697,17 @@ class AgentHub:
                 del self.points[old]
         await self._send(conn, {"type": "pick_point", "req": req, "countdown": countdown})
         return self.points[req]
+
+
+def _find_step(steps: list[dict], node: str) -> dict | None:
+    for step in steps:
+        if step.get("node") == node:
+            return step
+        for key in ("then", "else", "body"):
+            found = _find_step(step.get(key) or [], node)
+            if found:
+                return found
+    return None
 
 
 def _in_loop(loop) -> bool:
