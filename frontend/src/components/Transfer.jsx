@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { api } from '../api.js'
+import { usePasteFiles } from '../paste.js'
 
 async function download(url, fallbackName) {
   const res = await fetch(url)
@@ -160,6 +161,15 @@ export function ImportBox({ onImported }) {
       if (input.current) input.current.value = ''
     }
   }
+  usePasteFiles(
+    (files) => {
+      const f = files.find((x) => /\.json$/i.test(x.name) || x.type === 'application/json')
+      if (!f || busy || result) return false
+      pick(f)
+      return true
+    },
+    { priority: 2 },
+  )
 
   if (result) {
     const p = result.project
@@ -189,7 +199,7 @@ export function ImportBox({ onImported }) {
       <button type="button" onClick={() => input.current?.click()} disabled={busy}>
         {busy ? 'Импортирую…' : '📂 Импорт из файла…'}
       </button>
-      <span className="muted"> .dragapi.json — из «📦 Экспорт» на этой или другой платформе DragAPI</span>
+      <span className="muted"> .dragapi.json — из «📦 Экспорт» на этой или другой платформе DragAPI (можно вставить файл через Ctrl+V)</span>
       {error && <div className="issue error">{error}</div>}
     </div>
   )

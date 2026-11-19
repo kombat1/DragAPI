@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { api } from '../api.js'
+import { usePasteFiles } from '../paste.js'
 
 // Блоки «Зрение»: снимок экрана агента, на котором мышкой выделяют образец / область или выбирают точку.
 
@@ -212,6 +213,15 @@ export function ImageField({ value, onChange, projectId, agent, readOnly }) {
     if (f.size > 2_000_000) return setError('картинка больше 2 МБ — вырежьте фрагмент поменьше')
     onChange(await readFile(f))
   }
+  usePasteFiles(
+    (files) => {
+      const img = files.find((f) => f.type.startsWith('image/'))
+      if (!img) return false
+      upload(img)
+      return true
+    },
+    { enabled: !readOnly, priority: 1 },
+  )
   return (
     <div className="image-field">
       {value ? (
@@ -236,6 +246,7 @@ export function ImageField({ value, onChange, projectId, agent, readOnly }) {
           </button>
         )}
       </div>
+      {!readOnly && <div className="hint">или вставьте картинку из буфера: Ctrl+V</div>}
       {error && <div className="issue error">{error}</div>}
       {picking && (
         <ScreenPicker

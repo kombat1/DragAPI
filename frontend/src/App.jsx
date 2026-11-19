@@ -25,6 +25,7 @@ import { newId } from './components/ProjectSettings.jsx'
 import { AgentsModal, RecordModal } from './components/Automation.jsx'
 import { PublishModal } from './components/Bots.jsx'
 import { ExportModal, ImportBox } from './components/Transfer.jsx'
+import { usePasteFiles } from './paste.js'
 
 
 const BRANCH_LABELS = {
@@ -616,12 +617,58 @@ function Editor({ catalogs, projectId, onProjectsChanged, me }) {
       if (k === 'z' && !e.shiftKey) (e.preventDefault(), undo())
       else if ((k === 'z' && e.shiftKey) || k === 'y') (e.preventDefault(), redo())
       else if (k === 'c') copySelection()
-      else if (k === 'v') (e.preventDefault(), paste())
       else if (k === 'd') (e.preventDefault(), copySelection() && paste())
     }
+    // Ctrl+V — через событие paste: файлы из буфера (картинки, документы) разбирают их получатели,
+    // иначе вставляются скопированные блоки
+    const onPaste = (e) => {
+      const el = document.activeElement
+      const typing = ['INPUT', 'TEXTAREA', 'SELECT'].includes(el?.tagName) || el?.isContentEditable
+      if (e.defaultPrevented || typing || readOnly || document.querySelector('.modal-backdrop')) return
+      e.preventDefault()
+      paste()
+    }
     window.addEventListener('keydown', h)
-    return () => window.removeEventListener('keydown', h)
+    window.addEventListener('paste', onPaste)
+    return () => {
+      window.removeEventListener('keydown', h)
+      window.removeEventListener('paste', onPaste)
+    }
   })
+
+  // картинка из буфера на холсте сценария → новый блок «Найти картинку» с этим образцом
+  usePasteFiles(
+    (files) => {
+      if (document.querySelector('.modal-backdrop')) return false
+      const img = files.find((f) => /^image\/(png|jpeg|webp|bmp)$/.test(f.type))
+      if (!isAuto || !catalog.blocks.image_find) {
+        notify('Файл из буфера можно вставить в тест-чат бота, в образец блока «Найти картинку» или в импорт проекта', 'error')
+        return true
+      }
+      if (!img) {
+        notify('На холст сценария можно вставить только картинку PNG или JPEG', 'error')
+        return true
+      }
+      if (img.size > 2_000_000) {
+        notify('Картинка больше 2 МБ — вырежьте фрагмент поменьше', 'error')
+        return true
+      }
+      const r = new FileReader()
+      r.onload = () => {
+        const box = wrapper.current?.getBoundingClientRect()
+        const position = screenToFlowPosition(box ? { x: box.left + box.width / 2, y: box.top + box.height / 2 } : { x: 400, y: 300 })
+        const id = `image_find-${uid()}`
+        const data = { ...structuredClone(catalog.blocks.image_find.defaults), image: r.result }
+        setNodes((ns) => [...ns.map((n) => (n.selected ? { ...n, selected: false } : n)), { id, type: 'image_find', position, data, selected: true }])
+        setSelectedId(id)
+        markDirty()
+        notify('Добавлен блок «Найти картинку» с картинкой из буфера')
+      }
+      r.readAsDataURL(img)
+      return true
+    },
+    { enabled: !readOnly && loaded, priority: -1 },
+  )
 
   // запись действий → цепочка блоков после выделенного блока (или в конец первого сценария)
   const insertChain = (blocks) => {

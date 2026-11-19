@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { api } from '../api.js'
+import { pastedName, usePasteFiles } from '../paste.js'
 
 const fmtTime = (t) => (t ? new Date(t * 1000).toLocaleTimeString() : '')
 
@@ -78,15 +79,25 @@ export function EmulatorPanel({ projectId, graph, readOnly, onSelectNode, onTrac
     send({ text })
     setText('')
   }
+  const sendFile = async (f, name = f.name) => {
+    const data = await readFile(f)
+    const preview = f.type.startsWith('image/') && f.size <= 1_500_000 ? data : null
+    send({ file: { name, mime: f.type || 'application/octet-stream', size: f.size, preview, data }, text: text || null })
+    setText('')
+  }
   const attach = async (e) => {
     const f = e.target.files?.[0]
     e.target.value = ''
-    if (!f) return
-    const data = await readFile(f)
-    const preview = f.type.startsWith('image/') && f.size <= 1_500_000 ? data : null
-    send({ file: { name: f.name, mime: f.type, size: f.size, preview, data }, text: text || null })
-    setText('')
+    if (f) sendFile(f)
   }
+  // Ctrl+V: снимок экрана или скопированный файл уходит боту как вложение
+  usePasteFiles(
+    (files) => {
+      sendFile(files[0], pastedName(files[0]))
+      return true
+    },
+    { enabled: !readOnly && !busy, priority: 1 },
+  )
   const errors = state.log.filter((e) => e.kind === 'error')
   const keyboard = state.keyboard || null
   const title = group ? 'Тестовая группа' : botName || 'Бот'
@@ -273,7 +284,7 @@ export function EmulatorPanel({ projectId, graph, readOnly, onSelectNode, onTrac
               /
             </button>
           )}
-          <button type="button" className="tg-icon" title="Прикрепить фото или файл" disabled={readOnly || busy} onClick={() => fileInput.current?.click()}>
+          <button type="button" className="tg-icon" title="Прикрепить фото или файл (или Ctrl+V)" disabled={readOnly || busy} onClick={() => fileInput.current?.click()}>
             📎
           </button>
           <input ref={fileInput} type="file" hidden onChange={attach} />
