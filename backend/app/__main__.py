@@ -9,6 +9,12 @@ import sys
 
 
 def main():
+    if sys.platform == "win32":   # консоль Windows: кириллица в выводе не должна ронять сервер
+        for stream in (sys.stdout, sys.stderr):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except (AttributeError, ValueError):
+                pass
     ap = argparse.ArgumentParser(prog="python -m app", description="Сервер платформы DragAPI")
     ap.add_argument("--no-auth", action="store_true",
                     help="без входа; разрешено, только пока в платформе нет пользователей и только на 127.0.0.1")
@@ -86,5 +92,41 @@ def main():
     )
 
 
+def backup_cli(argv: list[str]) -> None:
+    """python -m app backup [ФАЙЛ] [--password-env ПЕРЕМЕННАЯ]  ·  python -m app restore ФАЙЛ [--password-env …]"""
+    ap = argparse.ArgumentParser(prog=f"python -m app {argv[0]}")
+    if argv[0] == "backup":
+        ap.add_argument("file", nargs="?", help="куда сохранить (по умолчанию dragapi-backup-<дата>.zip)")
+    else:
+        ap.add_argument("file", help="файл копии (.zip или .dragapi-backup.enc)")
+    ap.add_argument("--password-env", help="имя переменной окружения с паролем копии (зашифровать / расшифровать)")
+    args = ap.parse_args(argv[1:])
+    import time
+    from . import backup
+    from .paths import DATA
+    password = os.environ.get(args.password_env, "") if args.password_env else None
+    if args.password_env and not password:
+        sys.exit(f"переменная {args.password_env} пуста")
+    try:
+        if argv[0] == "backup":
+            out = args.file or time.strftime("dragapi-backup-%Y%m%d-%H%M") + (".dragapi-backup.enc" if password else ".zip")
+            blob = backup.create(DATA, password)
+            with open(out, "wb") as f:
+                f.write(blob)
+            print(f"Резервная копия: {out} ({len(blob) / 1e6:.1f} МБ). В ней ключ шифрования секретов — "
+                  f"храните её как пароль{'' if password else ' или делайте копию с --password-env'}.")
+        else:
+            with open(args.file, "rb") as f:
+                manifest = backup.stage_restore(DATA, f.read(), password)
+            print(f"Копия от {time.strftime('%Y-%m-%d %H:%M', time.localtime(manifest['created']))} подготовлена "
+                  f"({manifest.get('projects', '?')} проектов). Она применится при следующем запуске платформы; "
+                  f"текущие данные будут отложены рядом.")
+    except (backup.BackupError, OSError) as e:
+        sys.exit(f"DragAPI: {e}")
+
+
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) > 1 and sys.argv[1] in ("backup", "restore"):
+        backup_cli(sys.argv[1:])
+    else:
+        main()

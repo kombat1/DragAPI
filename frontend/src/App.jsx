@@ -25,6 +25,7 @@ import { newId } from './components/ProjectSettings.jsx'
 import { AgentsModal, RecordModal } from './components/Automation.jsx'
 import { PublishModal } from './components/Bots.jsx'
 import { ExportModal, ImportBox } from './components/Transfer.jsx'
+import { BackupModal } from './components/Backup.jsx'
 import { usePasteFiles } from './paste.js'
 import { DECOR_DEFAULTS, DECOR_PALETTE, DecorInspector, FrameNode, NoteNode, frameAround, isDecor, membersOf } from './components/Frames.jsx'
 
@@ -1278,6 +1279,7 @@ export default function App() {
 function Workspace({ me, onLogout }) {
   const [catalogs, setCatalogs] = useState(null)
   const [newOpen, setNewOpen] = useState(false)
+  const [backupOpen, setBackupOpen] = useState(false)
   const [space, setSpace] = useState(() => {
     try {
       return localStorage.getItem('dragapi.space') || 'api'
@@ -1406,6 +1408,11 @@ function Workspace({ me, onLogout }) {
             </button>
           )}
           <div className="spacer" />
+          {(!me || me.role === 'admin') && (
+            <button className="small" onClick={() => setBackupOpen(true)} title="Скачать копию всех данных платформы или восстановить из неё">
+              💾 Резервная копия
+            </button>
+          )}
           {me && <UserMenu me={me} onLogout={onLogout} />}
         </nav>
         {projectId && inSpace.some((p) => p.id === projectId) ? (
@@ -1418,6 +1425,7 @@ function Workspace({ me, onLogout }) {
             <button onClick={createProject}>Создать</button>
           </div>
         )}
+        {backupOpen && <BackupModal onClose={() => setBackupOpen(false)} />}
         {newOpen && <NewProjectModal initialKind={space} onCreate={doCreate} onImported={doImported} onClose={() => setNewOpen(false)} />}
       </div>
     </CatalogContext.Provider>

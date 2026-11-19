@@ -105,6 +105,8 @@ async def access_control(request: Request, call_next):
         return FastJSON({"detail": "нужно войти"}, status_code=401)
     if path.startswith("/api/users") and not path.startswith("/api/users/brief") and user["role"] != "admin":
         return FastJSON({"detail": "только для администратора"}, status_code=403)
+    if path.startswith("/api/backup") and user["role"] != "admin":
+        return FastJSON({"detail": "резервные копии — только для администратора"}, status_code=403)
     if path.startswith("/api/agents") and request.method not in ("GET", "HEAD") and user["role"] != "admin":
         return FastJSON({"detail": "агентами управляет администратор"}, status_code=403)
     m = PROJECT_PATH.match(path)
@@ -791,6 +793,63 @@ async def deploy_stop(pid: str, remove_data: bool = False):
     _load(pid)
     await deployments.stop(pid, remove_data)
     return await deployments.status(pid)
+
+
+# --- резервная копия всех данных платформы ---
+
+MAX_BACKUP_UPLOAD = 2 * 1024 ** 3
+
+
+@app.get("/api/backup")
+def backup_info():
+    from . import backup
+    from .paths import DATA
+    return {**backup.summary(DATA), "pending": backup.pending(DATA), "previous": backup.previous_copies(DATA)}
+
+
+class BackupIn(BaseModel):
+    password: str | None = None
+
+
+@app.post("/api/backup")
+def backup_download(body: BackupIn):
+    from . import backup
+    from .paths import DATA
+    if body.password is not None and len(body.password) < 8:
+        raise HTTPException(400, "пароль копии — не короче 8 символов")
+    try:
+        blob = backup.create(DATA, body.password or None, app_version=app.version)
+    except backup.BackupError as e:
+        raise HTTPException(500, str(e)) from None
+    name = time.strftime("dragapi-backup-%Y%m%d-%H%M") + (".dragapi-backup.enc" if body.password else ".zip")
+    return Response(blob, media_type="application/octet-stream",
+                    headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+
+@app.post("/api/backup/restore")
+async def backup_restore(request: Request):
+    """Загрузить копию: распаковывается рядом и применяется при следующем запуске платформы."""
+    from . import backup
+    from .paths import DATA
+    form = await request.form(max_files=1, max_fields=5)   # файл копии сохраняется на диск, не в память
+    upload, password = form.get("file"), form.get("password") or None
+    if upload is None or not hasattr(upload, "read"):
+        raise HTTPException(400, "выберите файл копии")
+    blob = await upload.read()
+    if len(blob) > MAX_BACKUP_UPLOAD:
+        raise HTTPException(413, "файл больше 2 ГБ")
+    try:
+        manifest = await asyncio.to_thread(backup.stage_restore, DATA, blob, password)
+    except backup.BackupError as e:
+        raise HTTPException(400, str(e)) from None
+    return {"ok": True, "manifest": manifest}
+
+
+@app.delete("/api/backup/restore")
+def backup_restore_cancel():
+    from . import backup
+    from .paths import DATA
+    return {"ok": backup.cancel_pending(DATA)}
 
 
 # --- журнал запросов API: превью или развёрнутый контейнер ---

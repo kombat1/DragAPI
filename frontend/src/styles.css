@@ -715,3 +715,11 @@ button.link { border: none; background: none; color: var(--primary); padding: 0 
 .react-flow__edge.branch-error .react-flow__edge-path { stroke: var(--warn); stroke-dasharray: 5 4; }
 .run-event.warn { color: var(--warn); }
 .run-event.good { color: var(--ok); }
+
+/* ---------- резервная копия ---------- */
+.backup-modal { max-width: 640px; }
+.backup-section { display: flex; flex-direction: column; gap: 8px; padding: 12px 0; border-bottom: 1px solid var(--border); }
+.backup-section button { align-self: flex-start; }
+.backup-pw { display: flex; gap: 8px; flex-wrap: wrap; }
+.backup-pw input { flex: 1; min-width: 180px; }
+.backup-pending { display: block; line-height: 1.5; }
