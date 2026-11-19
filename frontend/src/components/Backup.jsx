@@ -161,7 +161,7 @@ export function BackupModal({ onClose }) {
         {error && <div className="issue error">{error}</div>}
         <div className="modal-foot">
           <span className="muted">
-            С сервера по расписанию: <code>python -m app backup</code> (подробно — в README).
+            С сервера по расписанию: <code>python -m app backup</code> (подробно — docs/GUIDE.md, «Резервная копия»).
           </span>
           <button onClick={onClose}>Закрыть</button>
         </div>
