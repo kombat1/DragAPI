@@ -26,7 +26,9 @@ from pathlib import Path
 from .paths import DATA
 
 ENVS_DIR = DATA / "envs"
-PYTHON = "/usr/bin/python3" if os.path.exists("/usr/bin/python3") else "python3"
+from .compat import IS_LINUX, clean_env, system_python, venv_python
+
+PYTHON = system_python()
 INSTALL_TIMEOUT = 15 * 60
 MAX_LOG = 60_000
 MAX_PACKAGES = 50
@@ -83,7 +85,7 @@ class EnvManager:
     def venv(self, pid: str) -> str | None:
         """Готовое окружение проекта или None (тогда код работает на системном Python без пакетов)."""
         path = self.dir(pid) / "venv"
-        return str(path) if (path / "bin" / "python").exists() else None
+        return str(path) if venv_python(path).exists() else None
 
     def _state(self, pid: str) -> dict:
         try:
@@ -137,10 +139,11 @@ class EnvManager:
             self._install(pid, packages, only_binary, use_firejail, job))
         return job
 
-    async def _run(self, job: Job, cmd: list[str], timeout: float) -> int:
+    async def _run(self, job: Job, cmd: list[str], timeout: float, env: dict | None = None) -> int:
         job.write("$ " + " ".join(c if len(c) < 120 else c[:117] + "..." for c in cmd) + "\n")
         proc = await asyncio.create_subprocess_exec(
-            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, stdin=asyncio.subprocess.DEVNULL)
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, stdin=asyncio.subprocess.DEVNULL,
+            env=env)
 
         async def pump():
             async for line in proc.stdout:
@@ -172,34 +175,38 @@ class EnvManager:
             if await self._run(job, [PYTHON, "-m", "venv", str(new)], 120) != 0:
                 raise RuntimeError("не удалось создать виртуальное окружение")
 
-            pip = [str(new / "bin" / "python"), "-m", "pip", "install", "--disable-pip-version-check",
+            py = str(venv_python(new))
+            pip = [py, "-m", "pip", "install", "--disable-pip-version-check",
                    "--no-input", "--progress-bar", "off"]
             if only_binary:
                 pip.append("--only-binary=:all:")
             if packages:
                 pip += ["-r", str(base / "requirements.txt")]
+                # чистое окружение: на Linux — через env -i (и firejail), на macOS и Windows — env процесса
                 env = ["env", "-i", "PATH=/usr/bin:/bin", "LC_ALL=C.UTF-8", f"HOME={base / 'home'}",
-                       f"PIP_CACHE_DIR={base / 'cache'}"]
+                       f"PIP_CACHE_DIR={base / 'cache'}"] if IS_LINUX else []
+                clean = None if IS_LINUX else clean_env(HOME=str(base / "home"), USERPROFILE=str(base / "home"),
+                                                         PIP_CACHE_DIR=str(base / "cache"))
                 sandbox = (["firejail", "--quiet", "--noprofile", f"--whitelist={base}", "--private-tmp",
                             "--private-dev", "--caps.drop=all", "--nonewprivs", "--seccomp", "--nogroups"]
                            if use_firejail else [])
                 job.write(f"\nУстанавливаю {len(packages)} пакет(ов)"
                           f"{' в firejail' if use_firejail else ''}…\n")
-                if await self._run(job, [*sandbox, *env, *pip], INSTALL_TIMEOUT) != 0:
+                if await self._run(job, [*sandbox, *env, *pip], INSTALL_TIMEOUT, env=clean) != 0:
                     raise RuntimeError("pip завершился с ошибкой — подробности выше")
 
             freeze = await asyncio.create_subprocess_exec(
-                str(new / "bin" / "python"), "-m", "pip", "freeze", "--disable-pip-version-check",
+                py, "-m", "pip", "freeze", "--disable-pip-version-check",
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
             out, _ = await freeze.communicate()
             installed = [line for line in out.decode().splitlines() if line.strip()]
             ver = await asyncio.create_subprocess_exec(
-                str(new / "bin" / "python"), "-c", "import sys; print(sys.version.split()[0])",
+                py, "-c", "import sys; print(sys.version.split()[0])",
                 stdout=asyncio.subprocess.PIPE)
             python_version = (await ver.communicate())[0].decode().strip()
             # pip в готовом окружении не нужен: код видит его только на чтение, а каждая установка
             # собирает окружение заново. Без pip окружение в несколько раз меньше.
-            await self._run(job, [str(new / "bin" / "python"), "-m", "pip", "uninstall", "-y", "-q",
+            await self._run(job, [py, "-m", "pip", "uninstall", "-y", "-q",
                                   "--disable-pip-version-check", "pip"], 120)
 
             # атомарная подмена: старое окружение работает до последнего момента

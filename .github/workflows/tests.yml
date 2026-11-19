@@ -1,0 +1,46 @@
+# Тесты на Linux, macOS и Windows: установка теми же скриптами, что у пользователя, сборка интерфейса, pytest.
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Установка (start.sh setup)
+        if: runner.os != 'Windows'
+        run: ./start.sh setup
+      - name: Установка (start.ps1 setup, Windows PowerShell 5.1)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: .\start.ps1 setup
+
+      - name: Сборка интерфейса
+        working-directory: frontend
+        run: npm run build
+
+      - name: Тесты
+        if: runner.os != 'Windows'
+        working-directory: backend
+        run: .venv/bin/python -m pytest -q
+      - name: Тесты (Windows)
+        if: runner.os == 'Windows'
+        working-directory: backend
+        env:
+          PYTHONUTF8: "1"
+        run: .venv\Scripts\python -m pytest -q

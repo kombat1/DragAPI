@@ -28,7 +28,8 @@ def backend():
         return X11Windows()
     if sys.platform == "win32":
         return Win32Windows()
-    raise WindowError("работа с окнами поддерживается на Linux (X11) и Windows")
+    raise WindowError("блоки окон работают на Linux (X11) и Windows; на macOS пока нет — "
+                      "используйте поиск картинки на экране")
 
 
 def _process_name(pid: int | None) -> str:

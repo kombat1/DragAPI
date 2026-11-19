@@ -263,10 +263,15 @@ class EgressProxy:
         self._writers: set[asyncio.StreamWriter] = set()
 
     async def __aenter__(self):
+        from .compat import UNIX_SOCKETS
         FW_DIR.mkdir(parents=True, exist_ok=True)
         self.dir = tempfile.mkdtemp(prefix="p", dir=FW_DIR)
-        self.path = str(Path(self.dir) / "proxy.sock")
-        self._server = await asyncio.start_unix_server(self._handle, self.path, limit=64 * 1024)
+        if UNIX_SOCKETS:
+            self.path = str(Path(self.dir) / "proxy.sock")
+            self._server = await asyncio.start_unix_server(self._handle, self.path, limit=64 * 1024)
+        else:   # Windows: прокси на локальном порту, песочница подключается к нему по TCP
+            self._server = await asyncio.start_server(self._handle, "127.0.0.1", 0, limit=64 * 1024)
+            self.path = "tcp:127.0.0.1:%d" % self._server.sockets[0].getsockname()[1]
         return self
 
     async def __aexit__(self, *exc):

@@ -307,13 +307,15 @@ def _interpreted(graph, tmp_path):
     ("def run(data, env):\n    return 1 / 0", "ZeroDivisionError: division by zero (строка 2)"),
     ("def run(data, env):\n    return {'y': 1, 'z': 2}", "необъявленные поля: z"),
     ("def run(data, env):\n    return [1]", "должна вернуть dict"),
-    ("def run(data, env):\n    while True:\n        pass", "превышено время выполнения"),
+    # бесконечный цикл останавливает или таймер платформы, или лимит CPU (без firejail, на macOS)
+    ("def run(data, env):\n    while True:\n        pass", ("превышено время выполнения", "превышен лимит CPU")),
 ])
 def test_code_block_runtime_errors(tmp_path, code, error):
     g = _code_graph(code)
     _node(g, "stats-code")["data"]["timeout"] = 0.5
     r = _interpreted(g, tmp_path).post("/text/stats", json={"text": "a b c"})
-    assert r.status_code == 500 and error in r.json()["error"] and r.json()["block"] == "stats-code"
+    errors = error if isinstance(error, tuple) else (error,)
+    assert r.status_code == 500 and any(e in r.json()["error"] for e in errors) and r.json()["block"] == "stats-code"
 
 
 def test_code_block_gets_env_and_trace_has_stdout(tmp_path):
@@ -723,7 +725,8 @@ def test_exported_tests_run_with_pytest(tmp_path):
     for path, content in codegen.generate_files(compile_project(g)).items():
         (root / path).parent.mkdir(parents=True, exist_ok=True)
         (root / path).write_text(content, "utf-8")
-    env = {"PATH": "/usr/bin:/bin", "API_KEY": "dev-secret", "HOME": str(tmp_path)}
+    from app.compat import clean_env
+    env = clean_env(API_KEY="dev-secret", HOME=str(tmp_path), USERPROFILE=str(tmp_path))
     proc = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "tests"],
                           cwd=root, env=env, capture_output=True, text=True, timeout=120)
     assert proc.returncode == 0, proc.stdout[-2000:] + proc.stderr[-2000:]
@@ -1027,7 +1030,8 @@ def test_auth_password_storage(tmp_path):
     s.create_user("user1", "password-123")
     raw = (tmp_path / "users.json").read_text()
     assert "password-123" not in raw and "scrypt$" in raw
-    assert oct((tmp_path / "users.json").stat().st_mode)[-3:] == "600"
+    if os.name != "nt":   # права файлов unix; на Windows доступ задают ACL каталога пользователя
+        assert oct((tmp_path / "users.json").stat().st_mode)[-3:] == "600"
     token, _ = s.login("user1", "password-123", "1.1.1.1")
     assert token not in (tmp_path / "sessions.json").read_text()  # хранится только хэш токена
 

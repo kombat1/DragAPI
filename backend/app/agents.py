@@ -743,12 +743,15 @@ def agent_bundle() -> bytes:
                    "# блоки «Зрение» (поиск картинки, цвет пикселя, OCR):\nnumpy>=1.26\nopencv-python-headless>=4.8\nmss>=9\n")
         z.writestr("README.txt", (
             "Агент автоматизации DragAPI\n\n"
-            "1. Python 3.10+:  python -m venv .venv && .venv/bin/pip install -r requirements.txt\n"
-            "   (Windows: .venv\\Scripts\\pip install -r requirements.txt)\n"
+            "1. Python 3.10+:  python3 -m venv .venv && .venv/bin/pip install -r requirements.txt\n"
+            "   Windows:       py -m venv .venv  и  .venv\\Scripts\\pip install -r requirements.txt\n"
             "2. Запуск:  DRAGAPI_AGENT_TOKEN=<токен> .venv/bin/python -m dragapi_agent --server http://<платформа>:8765\n"
+            "   Windows (PowerShell):  $env:DRAGAPI_AGENT_TOKEN=\"<токен>\"; .venv\\Scripts\\python -m dragapi_agent --server http://<платформа>:8765\n"
             "   (платформа по https — --server https://…; её собственный сертификат лежит здесь же в\n"
             "   platform-ca.pem, агент подхватывает его сам; другой файл — --ca <файл>)\n\n"
             "Linux: нужен сеанс X11 (на Wayland управление вводом ограничено).\n"
+            "macOS: разрешите терминалу «Универсальный доступ», «Мониторинг ввода» и «Запись экрана»\n"
+            "   (Системные настройки → Конфиденциальность и безопасность); блоки окон на macOS не работают.\n"
             "Распознавание текста (блок «Прочитать текст»): программа tesseract —\n"
             "   Linux: sudo apt install tesseract-ocr tesseract-ocr-rus;  Windows: установщик UB Mannheim,\n"
             "   путь к tesseract.exe — в переменной DRAGAPI_TESSERACT, если его нет в PATH.\n"

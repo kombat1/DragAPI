@@ -107,7 +107,9 @@ class PynputDriver:
         try:
             from pynput import keyboard, mouse
         except Exception as e:  # noqa: BLE001 — нет X-сервера, нет библиотеки и т.п.
-            raise DriverError(f"управление вводом недоступно: {e}") from None
+            hint = (" — на macOS разрешите терминалу (или Python) «Универсальный доступ» и «Мониторинг ввода» "
+                    "в «Системные настройки → Конфиденциальность и безопасность»" if sys.platform == "darwin" else "")
+            raise DriverError(f"управление вводом недоступно: {e}{hint}") from None
         self._keyboard, self._mouse_mod = keyboard, mouse
         self.m = mouse.Controller()
         self.k = keyboard.Controller()
@@ -126,6 +128,10 @@ class PynputDriver:
                 import ctypes
                 u = ctypes.windll.user32
                 return (u.GetSystemMetrics(0), u.GetSystemMetrics(1))
+            import mss   # macOS и остальные
+            with mss.mss() as sct:
+                mon = sct.monitors[1]
+                return (mon["width"], mon["height"])
         except Exception:  # noqa: BLE001
             pass
         return None

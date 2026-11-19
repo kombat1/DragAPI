@@ -58,7 +58,7 @@ class Fail(Exception):
 
 def repo_root(start: Path | None = None) -> Path:
     here = start or Path(__file__).resolve().parent
-    out = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=here, capture_output=True, text=True)
+    out = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=here, capture_output=True, text=True, encoding="utf-8", errors="replace")
     if out.returncode != 0:
         raise Fail("это не git-репозиторий")
     return Path(out.stdout.strip())
@@ -69,7 +69,7 @@ class Git:
         self.root = root
 
     def run(self, *args, check=True) -> str:
-        p = subprocess.run(["git", *args], cwd=self.root, capture_output=True, text=True)
+        p = subprocess.run(["git", *args], cwd=self.root, capture_output=True, text=True, encoding="utf-8", errors="replace")
         if check and p.returncode != 0:
             raise Fail(f"git {' '.join(args)}: {(p.stderr or p.stdout).strip()}")
         return p.stdout

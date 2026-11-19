@@ -59,10 +59,10 @@ if [[ $SCHEME == http && -f $CONF ]] && grep -Eq '^[[:space:]]*(tls_self_signed[
 fi
 
 # ---------- проверки ----------
-command -v python3 >/dev/null || die "нужен Python 3.10+ (python3)"
+command -v python3 >/dev/null || die "нужен Python 3.10+ (python3). macOS: brew install python  ·  Linux: sudo apt install python3 python3-venv"
 python3 -c 'import sys; sys.exit(sys.version_info < (3, 10))' || die "нужен Python 3.10 или новее, сейчас $(python3 --version)"
 if [[ $MODE != setup || ! -d "$FRONTEND/node_modules" ]]; then
-  command -v npm >/dev/null || die "нужен Node.js 18+ (npm) для интерфейса"
+  command -v npm >/dev/null || die "нужен Node.js 18+ (npm) для интерфейса. macOS: brew install node  ·  Linux: https://nodejs.org"
 fi
 
 port_busy() {   # кто слушает порт (пусто — свободен)
@@ -82,7 +82,9 @@ check_port() {
 }
 
 # ---------- зависимости ----------
-hash_of() { sha256sum "$@" 2>/dev/null | sha256sum | cut -c1-16; }
+# sha256sum (Linux) или shasum (macOS)
+if command -v sha256sum >/dev/null; then SHA=(sha256sum); else SHA=(shasum -a 256); fi
+hash_of() { "${SHA[@]}" "$@" 2>/dev/null | "${SHA[@]}" | cut -c1-16; }
 
 setup_backend() {
   if [[ ! -x $PY ]]; then
@@ -138,7 +140,7 @@ if [[ $MODE == prod ]]; then
   echo
   echo "${B}DragAPI${N} → ${G}$SCHEME://localhost:$PORT${N}   ${D}(Ctrl+C — остановить)${N}"
   cd "$BACKEND"
-  exec "$PY" -m app "${SERVER_ARGS[@]}"
+  exec "$PY" -m app ${SERVER_ARGS[@]+"${SERVER_ARGS[@]}"}
 fi
 
 # dev: два процесса, Ctrl+C или падение любого — останавливаем оба
@@ -157,9 +159,11 @@ cleanup() {
 trap 'cleanup; exit 0' INT TERM   # Ctrl+C — штатная остановка
 trap cleanup EXIT
 
-(cd "$BACKEND" && exec "$PY" -m app --reload "${SERVER_ARGS[@]}" 2>&1 | sed -u "s/^/${D}[бэкенд]${N} /") &
+# префикс строк без «sed -u» (его нет на macOS)
+prefix() { while IFS= read -r line; do printf '%s %s\n' "$1" "$line"; done; }
+(cd "$BACKEND" && exec "$PY" -m app --reload ${SERVER_ARGS[@]+"${SERVER_ARGS[@]}"} 2>&1 | prefix "${D}[бэкенд]${N}") &
 PIDS+=($!)
-(cd "$FRONTEND" && DRAGAPI_BACKEND="$SCHEME://127.0.0.1:$PORT" DRAGAPI_FRONT_PORT="$FRONT_PORT" exec npx vite --clearScreen false 2>&1 | sed -u "s/^/${D}[vite]${N} /") &
+(cd "$FRONTEND" && DRAGAPI_BACKEND="$SCHEME://127.0.0.1:$PORT" DRAGAPI_FRONT_PORT="$FRONT_PORT" exec npx vite --clearScreen false 2>&1 | prefix "${D}[vite]${N}") &
 PIDS+=($!)
 
 echo
@@ -169,6 +173,7 @@ echo "  бэкенд     → $SCHEME://localhost:$PORT   ${D}(перезапус
 echo "  ${D}Ctrl+C — остановить оба${N}"
 echo
 
-wait -n "${PIDS[@]}" || true
+# ждём, пока завершится любой из двух (wait -n нет в bash 3.2 на macOS)
+while kill -0 "${PIDS[0]}" 2>/dev/null && kill -0 "${PIDS[1]}" 2>/dev/null; do sleep 1; done
 warn "Один из процессов завершился — останавливаю второй"
 exit 1

@@ -71,7 +71,7 @@ class Agent:
         self.driver_factory = driver_factory
         self.stop_keys = parse_combo(stop_hotkey)
         self.use_listeners = listeners
-        self.notify_enabled = notify and bool(shutil.which("notify-send"))
+        self.notify_enabled = notify and bool(shutil.which("notify-send") or shutil.which("osascript"))
         self.lock = threading.RLock()
         self.driver = None
         self.driver_error: str | None = None
@@ -157,9 +157,13 @@ class Agent:
 
     def notify(self, text: str):
         if self.notify_enabled:
+            if shutil.which("notify-send"):            # Linux
+                cmd = ["notify-send", "-a", "DragAPI", "-t", "4000", "DragAPI", text]
+            else:                                       # macOS
+                quoted = text.replace("\\", "\\\\").replace('"', '\\"')
+                cmd = ["osascript", "-e", f'display notification "{quoted}" with title "DragAPI"']
             try:
-                subprocess.Popen(["notify-send", "-a", "DragAPI", "-t", "4000", "DragAPI", text],
-                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             except OSError:
                 pass
 

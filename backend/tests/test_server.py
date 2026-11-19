@@ -1,6 +1,7 @@
 """Запуск на сервере: HTTPS (свой и самоподписанный сертификат), прокси, защита от открытой платформы."""
 
 import io
+import os
 import ssl
 import zipfile
 
@@ -73,7 +74,8 @@ def test_self_signed_issue_reuse_and_extend(tmp_path):
     names = ["localhost", "127.0.0.1", "dragapi.lan"]
     cert, key, fresh = tls.ensure_self_signed(names, tmp_path)
     assert fresh and _sans(cert) >= {"localhost", "127.0.0.1", "dragapi.lan"}
-    assert oct((tmp_path / "server-key.pem").stat().st_mode & 0o777) == "0o600"
+    if os.name != "nt":
+        assert oct((tmp_path / "server-key.pem").stat().st_mode & 0o777) == "0o600"
     # сертификат сервера проверяется по CA платформы
     ctx = ssl.create_default_context(cafile=str(tls.ca_path(tmp_path)))
     ctx.load_cert_chain(cert, key)

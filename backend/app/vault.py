@@ -34,7 +34,7 @@ def _get() -> Fernet:
                 fd = os.open(KEY_PATH, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
                 with os.fdopen(fd, "wb") as f:
                     f.write(Fernet.generate_key())
-            key = KEY_PATH.read_text().strip()
+            key = KEY_PATH.read_text("utf-8").strip()
         try:
             _fernet = Fernet(key.encode())
         except ValueError as e:

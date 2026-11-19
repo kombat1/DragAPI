@@ -163,7 +163,7 @@ class DeployManager:
             await _run(job, "docker", "rm", "-f", n["container"], timeout=60)
             base.mkdir(parents=True, exist_ok=True)
             fd = os.open(env_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(fd, "w") as f:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
                 for k, v in env.items():
                     f.write(f"{k}={str(v).replace(chr(10), ' ')}\n")
             bind = "0.0.0.0" if public else "127.0.0.1"

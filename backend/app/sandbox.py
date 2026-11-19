@@ -24,7 +24,9 @@ from pathlib import Path
 import time
 from dataclasses import dataclass
 
-PYTHON = "/usr/bin/python3" if os.path.exists("/usr/bin/python3") else sys.executable
+from .compat import IS_WINDOWS, clean_env, set_limits, site_packages, system_python, venv_python
+
+PYTHON = system_python()
 MAX_STDOUT = 20_000
 MAX_INPUT = 2_000_000
 _SEMAPHORES: dict = {}  # по одному на event loop: не больше 4 песочниц одновременно
@@ -103,9 +105,14 @@ def _forward():
             sock = key.fileobj
             if sock is _listener:
                 client, _ = _listener.accept()
-                upstream = socket.socket(socket.AF_UNIX)
                 try:
-                    upstream.connect(PROXY_PATH)
+                    if PROXY_PATH.startswith("tcp:"):   # Windows: прокси платформы на локальном порту
+                        _h, _p = PROXY_PATH[4:].rsplit(":", 1)
+                        upstream = socket.socket()
+                        upstream.connect((_h, int(_p)))
+                    else:
+                        upstream = socket.socket(socket.AF_UNIX)
+                        upstream.connect(PROXY_PATH)
                 except OSError:
                     client.close()
                     continue
@@ -223,8 +230,12 @@ class SandboxSettings:
         return {k: getattr(self, k) for k in ("backend", "network", "threads", "max_file_mb", "max_open_files")}
 
 
+def firejail_supported() -> bool:
+    return sys.platform.startswith("linux")
+
+
 def firejail_available() -> bool:
-    return shutil.which("firejail") is not None
+    return firejail_supported() and shutil.which("firejail") is not None
 
 
 def docker_info() -> dict:
@@ -289,6 +300,8 @@ def describe(settings: SandboxSettings | None = None, firewall=None) -> dict:
         parts.append({"off": "без сети", "filtered": "сеть только через firewall проекта",
                       "open": "сеть без ограничений"}[mode])
         parts.append("файлы платформы не видны")
+    elif IS_WINDOWS:
+        parts.append("отдельный процесс с лимитом времени — сеть и файлы доступны, памяти не ограничена")
     else:
         parts.append("отдельный процесс только с лимитами — сеть и файлы доступны")
     parts.append("потоки разрешены" if settings.threads else "без потоков и подпроцессов")
@@ -301,6 +314,9 @@ def describe(settings: SandboxSettings | None = None, firewall=None) -> dict:
         warning = "медленнее остальных режимов: ~0.5–1 с на вызов"
     elif settings.backend == "firejail" and not firejail_available():
         warning = "firejail не установлен — используется обычный процесс"
+    elif backend == "process" and not firejail_supported():
+        warning = ("слабая изоляция: на этой ОС firejail нет — для строгой изоляции выберите Docker" + (
+            "; правила firewall без изоляции не гарантируются" if mode == "filtered" else ""))
     elif backend == "process":
         warning = "слабая изоляция: установите firejail" + (
             "; правила firewall без firejail не гарантируются" if mode == "filtered" else "")
@@ -345,7 +361,7 @@ def _docker_command(name: str, limits: Limits, settings: SandboxSettings, venv: 
     if docker_info()["gvisor"]:
         cmd += ["--runtime", "runsc"]
     if venv:
-        site = next(Path(venv).glob("lib/python*/site-packages"), None)
+        site = site_packages(venv)
         if site:
             cmd += ["-v", f"{site}:/opt/site:ro"]
     if proxy_dir:
@@ -358,12 +374,12 @@ def _command(backend: str, limits: Limits, settings: SandboxSettings, venv: str 
     mem = int(limits.memory_mb) * 1024 * 1024
     cpu = max(1, int(limits.timeout + 0.999))
     fsize = settings.max_file_mb * 1024 * 1024
-    python = os.path.join(venv, "bin", "python") if venv else PYTHON
+    python = str(venv_python(venv)) if venv else PYTHON
     # -I: без PYTHONPATH и пользовательского site; -S (без site) — только без venv, иначе пакеты не найдутся
     flags = ["-I"] if venv else ["-I", "-S"]
-    worker = ["env", "-i", "LC_ALL=C.UTF-8", "PYTHONIOENCODING=utf-8", "OPENBLAS_NUM_THREADS=1",
-              "OMP_NUM_THREADS=1", "MKL_NUM_THREADS=1", python, *flags, "-c", WORKER]
     if backend == "firejail":
+        worker = ["env", "-i", "LC_ALL=C.UTF-8", "PYTHONIOENCODING=utf-8", "OPENBLAS_NUM_THREADS=1",
+                  "OMP_NUM_THREADS=1", "MKL_NUM_THREADS=1", python, *flags, "-c", WORKER]
         # без venv домашний каталог полностью приватный; с venv виден только он, и только на чтение
         fs = [f"--whitelist={venv}", f"--read-only={venv}"] if venv else []
         if proxy_dir:  # сокет фильтрующего прокси — единственный путь наружу
@@ -380,17 +396,20 @@ def _command(backend: str, limits: Limits, settings: SandboxSettings, venv: str 
             f"--rlimit-fsize={fsize}", f"--rlimit-nofile={settings.max_open_files}", *worker,
         ], {}
 
-    def preexec():  # только для backend=process
-        import resource
-        resource.setrlimit(resource.RLIMIT_AS, (mem, mem))
-        resource.setrlimit(resource.RLIMIT_CPU, (cpu, cpu))
-        resource.setrlimit(resource.RLIMIT_FSIZE, (fsize, fsize))
-        resource.setrlimit(resource.RLIMIT_NOFILE, (settings.max_open_files, settings.max_open_files))
+    # backend=process: почти пустое окружение и лимиты ресурсов там, где они есть (Linux, macOS)
+    worker = [python, *flags, "-c", WORKER]
+    if IS_WINDOWS:   # лимитов памяти и процессов нет — остаётся лимит времени
+        return worker, {"env": clean_env()}
+
+    def preexec():
+        limits_ = {"RLIMIT_AS": (mem, mem), "RLIMIT_CPU": (cpu, cpu), "RLIMIT_FSIZE": (fsize, fsize),
+                   "RLIMIT_NOFILE": (settings.max_open_files, settings.max_open_files)}
         if not settings.threads and mode != "filtered":
-            resource.setrlimit(resource.RLIMIT_NPROC, (1, 1))  # лимит на пользователя: новые процессы не создать
+            limits_["RLIMIT_NPROC"] = (1, 1)  # лимит на пользователя: новые процессы не создать
+        set_limits(limits_)
         os.setsid()
 
-    return worker, {"preexec_fn": preexec}
+    return worker, {"preexec_fn": preexec, "env": clean_env()}
 
 
 async def run_code(code: str, data: dict, env: dict, limits: Limits | None = None,

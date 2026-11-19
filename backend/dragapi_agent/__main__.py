@@ -25,6 +25,12 @@ def _bundled_ca() -> str | None:
 
 
 def main():
+    if sys.platform == "win32":   # консоль Windows: кириллица в выводе не должна ронять агента
+        for stream in (sys.stdout, sys.stderr):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except (AttributeError, ValueError):
+                pass
     ap = argparse.ArgumentParser(prog="python -m dragapi_agent", description="Агент автоматизации DragAPI")
     ap.add_argument("--server", required=True, help="адрес платформы, например http://192.168.1.10:8765")
     ap.add_argument("--token", default=os.environ.get("DRAGAPI_AGENT_TOKEN"),
