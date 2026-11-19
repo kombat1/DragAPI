@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import inspect
 
-from . import runtime
+from . import reqlog, runtime
 from .expr import FUNCTIONS_SOURCE, to_python
 from .graph import (
     AuthStep, Branch, Chain, CodeStep, CompiledProject, DbStep, EndpointPlan, FieldSpec, InputStep, ScenarioStep,
@@ -207,7 +207,7 @@ def generate(project: CompiledProject) -> str:
         "import re",
         "from typing import Any, Optional",
         "",
-        "from fastapi import Body, FastAPI, File, Form, Path, Query, Security, UploadFile",
+        "from fastapi import Body, FastAPI, File, Form, Path, Query, Request, Security, UploadFile",
         "from fastapi.encoders import jsonable_encoder",
         "from fastapi.responses import JSONResponse",
         "from fastapi.security import APIKeyHeader, APIKeyQuery, HTTPBearer",
@@ -218,6 +218,7 @@ def generate(project: CompiledProject) -> str:
     if needs_runtime(project):
         parts += ["", inspect.getsource(runtime).strip(), "", ""]
         parts.append("# --- конец runtime ---")
+    parts += ["", inspect.getsource(reqlog).strip(), "", "", "# --- конец журнала запросов ---"]
 
     parts += ["", "# Переменные окружения проекта. Секреты не попадают в код — задайте их в окружении."]
     parts.append("ENV = {")
@@ -241,6 +242,19 @@ def generate(project: CompiledProject) -> str:
                   "# За обратным прокси включите trust_proxy, иначе все клиенты будут иметь IP прокси.",
                   f"app.add_middleware(IngressFirewall, rules={ingress.runtime_rules()!r}, "
                   f"default={ingress.default!r}, trust_proxy={ingress.trust_proxy!r})"]
+    parts += ["", "# Журнал запросов: время ответа и ошибки по эндпоинтам (последние 5000 запросов, в памяти).",
+              "# Платформа DragAPI читает его по /_dragapi/requests с заголовком X-DragAPI-Log-Token, равным",
+              "# переменной DRAGAPI_LOG_TOKEN; без этой переменной адрес отвечает 404.",
+              "REQUEST_LOG = RequestLog()",
+              "app.add_middleware(RequestLogMiddleware, log=REQUEST_LOG)  # снаружи firewall: отказы тоже видны",
+              "",
+              "",
+              "@app.get('/_dragapi/requests', include_in_schema=False)",
+              "def _dragapi_requests(request: Request, since: Optional[float] = None, errors: bool = False,",
+              "                      route: Optional[str] = None, limit: int = 200):",
+              "    if not reqlog_allowed(request.headers.get('x-dragapi-log-token')):",
+              "        return JSONResponse({'detail': 'Not Found'}, status_code=404)",
+              "    return REQUEST_LOG.query(since, errors, route, limit)"]
     parts += ["", "", "# --- функции, доступные в выражениях ---",
               FUNCTIONS_SOURCE, "", "",
               "async def _file_info(f):",

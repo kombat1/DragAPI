@@ -112,7 +112,8 @@ class DeployManager:
         job = self.jobs.get(pid)
         settings = self.settings(pid)
         info = {"docker": docker_available(), "deploying": bool(job and job.state == "deploying"),
-                "log": job.log if job else settings.get("log", ""), "settings": settings, **n}
+                "log": job.log if job else settings.get("log", ""),
+                "settings": {k: v for k, v in settings.items() if k != "log_token"}, **n}
         if not info["docker"]:
             return {**info, "container": None}
         code, out = await _run(None, "docker", "inspect", "--format",
@@ -196,8 +197,10 @@ class DeployManager:
             job.state = "ready" if ok else "error"
             base.mkdir(parents=True, exist_ok=True)
             self.settings_path(pid).write_text(json.dumps(
-                {"port": port, "public": public, "ok": ok, "finished": time.time(), "log": job.log},
+                {"port": port, "public": public, "ok": ok, "finished": time.time(), "log": job.log,
+                 "log_token": env.get("DRAGAPI_LOG_TOKEN")},
                 ensure_ascii=False), "utf-8")
+            self.settings_path(pid).chmod(0o600)   # в нём токен журнала запросов
 
     async def stop(self, pid: str, remove_data: bool = False):
         n = names(pid)

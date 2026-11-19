@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import TestsPanel from './TestsPanel.jsx'
+import RequestLog from './RequestLog.jsx'
 import { api } from '../api.js'
 import { NetworkEvents } from './Inspector.jsx'
 import { RunsPanel } from './Automation.jsx'
@@ -285,6 +286,7 @@ export default function BottomPanel({
               ['tests', `Тесты${testsProps.tests.length ? ` (${testsProps.tests.length})` : ''}`],
               ['issues', `Проблемы${issues.length ? ` (${issues.length})` : ''}`],
               ['logs', `Логи${running ? ' ●' : ''}`],
+              ['requests', 'Журнал запросов'],
               ['data', `Данные${models?.length ? ` (${models.length})` : ''}`],
               ['versions', 'История'],
             ]
@@ -333,6 +335,9 @@ export default function BottomPanel({
             ))}
           {tab === 'logs' && (
             <Logs projectId={projectId} running={running} onSelectNode={onSelectNode} onHighlight={onHighlight} />
+          )}
+          {tab === 'requests' && (
+            <RequestLog projectId={projectId} running={running} routes={testsProps.routes} onSelectNode={onSelectNode} />
           )}
           {tab === 'data' && <DataView projectId={projectId} running={running} />}
           {tab === 'versions' && <Versions projectId={projectId} onRestored={onRestored} />}

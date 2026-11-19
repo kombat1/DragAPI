@@ -14,6 +14,7 @@ from collections import deque
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import secrets
 import time
 import uuid
 
@@ -37,6 +38,7 @@ from .graph import CompiledProject, GraphError, compile_project
 from .interpreter import build_app
 from .firewall import FirewallSettings
 from .runtime import Database, DatabaseError, IngressFirewall
+from .reqlog import RequestLog, RequestLogMiddleware
 
 @asynccontextmanager
 async def lifespan(_app):
@@ -268,6 +270,7 @@ class LiveRunner:
         self.dbs: dict[str, Database] = {}
         self.logs: dict[str, deque] = {}
         self.fw_logs: dict[str, deque] = {}
+        self.reqlogs: dict[str, RequestLog] = {}   # журнал запросов превью: статистика по эндпоинтам
         self.router = Router()
 
     def mount(self, pid: str, sub, db: Database | None):
@@ -289,6 +292,9 @@ class LiveRunner:
 
     def log(self, pid: str) -> deque:
         return self.logs.setdefault(pid, deque(maxlen=50))
+
+    def reqlog(self, pid: str) -> RequestLog:
+        return self.reqlogs.setdefault(pid, RequestLog())
 
     def fw_log(self, pid: str) -> deque:
         """Журнал firewall: исходящие соединения кода и входящие запросы к API."""
@@ -707,6 +713,7 @@ def run_project(pid: str):
     if ingress.enabled:
         sub = IngressFirewall(sub, ingress.runtime_rules(), ingress.default, ingress.trust_proxy,
                               on_event=lambda e: runner.fw_event(pid, e))
+    sub = RequestLogMiddleware(sub, runner.reqlog(pid))   # снаружи firewall: отказы (403) тоже в журнале
     runner.mount(pid, sub, db)
     return {
         "ok": True,
@@ -739,6 +746,7 @@ async def deploy_start(pid: str, body: DeployIn):
     project = _with_secrets(pid, _load(pid))
     compiled = _compile(project)
     env = {e.key: e.value for e in compiled.env}
+    env["DRAGAPI_LOG_TOKEN"] = secrets.token_urlsafe(24)   # платформа читает журнал запросов контейнера
     try:
         deployments.start(pid, codegen.generate_files(compiled), env, body.port, body.public)
     except RuntimeError as e:
@@ -751,6 +759,42 @@ async def deploy_stop(pid: str, remove_data: bool = False):
     _load(pid)
     await deployments.stop(pid, remove_data)
     return await deployments.status(pid)
+
+
+# --- журнал запросов API: превью или развёрнутый контейнер ---
+
+
+@app.get("/api/projects/{pid}/requests")
+async def request_log(pid: str, source: str = "preview", since: float | None = None, errors: bool = False,
+                      route: str | None = None, limit: int = 200):
+    _load(pid)
+    params = {"since": since, "errors": errors, "route": route, "limit": limit}
+    if source == "preview":
+        return {"source": "preview", "running": pid in runner.apps, **runner.reqlog(pid).query(**params)}
+    if source != "deploy":
+        raise HTTPException(400, "source: preview или deploy")
+    settings = deployments.settings(pid)
+    port, token = settings.get("port"), settings.get("log_token")
+    if not port or not token:
+        raise HTTPException(409, "проект ещё не развёрнут кнопкой «Деплой» (или развёрнут старой версией платформы — "
+                                 "разверните заново)")
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            r = await client.get(f"http://127.0.0.1:{port}/_dragapi/requests", headers={"X-DragAPI-Log-Token": token},
+                                 params={k: v for k, v in params.items() if v not in (None, False)})
+    except httpx.HTTPError:
+        raise HTTPException(502, "контейнер не отвечает — он запущен? (вкладка «Деплой»)") from None
+    if r.status_code != 200:
+        raise HTTPException(502, f"контейнер ответил {r.status_code} — разверните проект заново")
+    return {"source": "deploy", "running": True, **r.json()}
+
+
+@app.delete("/api/projects/{pid}/requests")
+def request_log_clear(pid: str):
+    _load(pid)
+    runner.reqlog(pid).clear()
+    return {"ok": True}
 
 
 @app.get("/api/projects/{pid}/deploy/logs")
