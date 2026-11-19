@@ -39,6 +39,13 @@ class StepError(Exception):
         self.node = node
 
 
+class LimitError(StepError):
+    """Лимит времени или действий сценария — не повторяется и не уходит в ветку «ошибка»."""
+
+
+MAX_CALL_DEPTH = 20
+
+
 class Finish(Exception):
     def __init__(self, status, message):
         super().__init__(message)
@@ -88,6 +95,7 @@ class Runner:
         self.started = 0.0
         self.node = None
         self.last_target: tuple | None = None
+        self.depth = 0          # вложенность подпрограмм («Выполнить сценарий»)
 
     # --- служебное ---
 
@@ -95,14 +103,14 @@ class Runner:
         if self.stop.is_set():
             raise Stopped("остановлено")
         if time.monotonic() - self.started > self.limits["max_seconds"]:
-            raise StepError(self.node, f"сценарий идёт дольше {self.limits['max_seconds']} с — остановлен лимитом")
+            raise LimitError(self.node, f"сценарий идёт дольше {self.limits['max_seconds']} с — остановлен лимитом")
 
     def act(self, n: int = 1):
         """Перед каждым действием ввода: стоп, лимиты, аварийный угол."""
         self.check()
         self.actions += n
         if self.actions > self.limits["max_actions"]:
-            raise StepError(self.node, f"больше {self.limits['max_actions']} действий — остановлено лимитом")
+            raise LimitError(self.node, f"больше {self.limits['max_actions']} действий — остановлено лимитом")
         if self.limits.get("failsafe_corner"):
             pos = self.d.position()
             if pos[0] <= 1 and pos[1] <= 1 and self.last_target != (0, 0):
@@ -243,13 +251,60 @@ class Runner:
             handler = getattr(self, "op_" + op, None)
             if handler is None:
                 raise StepError(self.node, f"агент не умеет выполнять «{op}» — обновите агента")
-            try:
-                handler(step)
-            except (Stopped, StepError, Finish):
-                raise
-            except Exception as e:  # noqa: BLE001 — сбой драйвера ввода и т.п.: показать, в каком блоке
-                raise StepError(self.node, f"{type(e).__name__}: {e}") from None
+            policy = step.get("on_error")
+            failed = self._attempts(handler, step, policy) if policy else self._exec(handler, step)
+            if failed is not None:
+                if policy.get("then") == "branch" and step.get("on_fail") is not None:
+                    self.block(step["on_fail"])
+                    return                   # продолжение — в ветке «ошибка»
+                if policy.get("then") != "skip":
+                    raise failed
             self.node = step.get("node")
+            if "next" in step:               # шаг с веткой «ошибка»: продолжение после успеха
+                self.block(step["next"])
+                return
+
+    def _exec(self, handler, step):
+        try:
+            handler(step)
+        except (Stopped, StepError, Finish):
+            raise
+        except Exception as e:  # noqa: BLE001 — сбой драйвера ввода и т.п.: показать, в каком блоке
+            raise StepError(self.node, f"{type(e).__name__}: {e}") from None
+        return None
+
+    def _attempts(self, handler, step, policy) -> StepError | None:
+        """«Если шаг не удался»: повторить N раз с паузой. Повторяется только ошибка самого шага —
+        не лимиты и не ошибки внутри его веток. -> None (получилось) или последняя ошибка."""
+        node, op = step.get("node"), step["op"]
+        attempts = 1 + int(policy.get("retries") or 0)
+        error = None
+        for attempt in range(1, attempts + 1):
+            self.node = node
+            try:
+                self._exec(handler, step)
+                if attempt > 1:
+                    self.emit({"type": "step", "node": node, "op": op, "status": "recovered", "attempt": attempt,
+                               "of": attempts, "message": f"получилось с {attempt}-й попытки"})
+                return None
+            except LimitError:
+                raise
+            except StepError as e:
+                if e.node != node:
+                    raise
+                error = e
+            if attempt < attempts:
+                self.emit({"type": "step", "node": node, "op": op, "status": "retry", "attempt": attempt,
+                           "of": attempts, "message": f"попытка {attempt} из {attempts}: {error}"})
+                self.sleep(float(policy.get("delay") or 0))
+        self.node = node
+        self.vars[policy.get("var") or "error"] = {"message": str(error), "node": node, "block": op,
+                                                    "attempts": attempts}
+        then = policy.get("then") or "stop"
+        if then != "stop" and not (then == "branch" and step.get("on_fail") is None):
+            self.emit({"type": "step", "node": node, "op": op, "status": "failed", "then": then,
+                       "message": f"{error} — {'пропускаю шаг' if then == 'skip' else 'иду по ветке «ошибка»'}"})
+        return error
 
     # мышь
 
@@ -431,6 +486,37 @@ class Runner:
             if var:
                 self.vars[var] = i
             self.block(s["body"])
+
+    def op_call_scenario(self, s):
+        """Подпрограмма: свои переменные (только параметры), «Завершить» с успехом — возврат.
+        Сбой внутри — сбой этого блока (к нему применяется его «Если шаг не удался»)."""
+        name = s.get("scenario")
+        sub = (self.scenario.get("subs") or {}).get(name)
+        if sub is None:
+            raise StepError(self.node, f"сценарий «{name}» не найден — обновите агента или проверьте проект")
+        if self.depth >= MAX_CALL_DEPTH:
+            raise StepError(self.node, f"слишком глубокая вложенность подпрограмм (больше {MAX_CALL_DEPTH})")
+        node = self.node
+        inputs = {p: None for p in sub.get("params") or []}
+        for item in s.get("params") or []:
+            inputs[item["key"]] = self.ev(item["expr"], f"параметр «{item['key']}»")
+        caller = self.vars
+        self.vars, self.depth = inputs, self.depth + 1
+        self.emit({"type": "log", "node": node, "message": f"↪ сценарий «{name}»"})
+        try:
+            self.block(sub.get("steps") or [])
+        except Finish as f:
+            if f.status != "ok":
+                raise StepError(node, f"сценарий «{name}» завершился с ошибкой{': ' + f.message if f.message else ''}") from None
+        except LimitError:
+            raise
+        except StepError as e:
+            self.emit({"type": "step", "node": e.node, "status": "error", "message": str(e)})
+            raise StepError(node, f"сценарий «{name}»: {e}") from None
+        finally:
+            result, self.vars, self.depth, self.node = self.vars, caller, self.depth - 1, node
+        if s.get("target"):
+            self.vars[s["target"]] = result
 
     def op_stop(self, s):
         raise Finish(s.get("status") or "ok", self.text(s.get("message") or "", "сообщение"))

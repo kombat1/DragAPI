@@ -74,6 +74,8 @@ const withIds = (models) =>
   models.map((m) => ({ ...m, id: m.id || newId(), fields: (m.fields || []).map((f) => ({ ...f, id: f.id || newId() })) }))
 
 const uid = () => Math.random().toString(36).slice(2, 9)
+// у блоков ботов выход «error» свой (не из «Если шаг не удался»)
+const isBotNode = (nodes, id) => String(nodes.find((n) => n.id === id)?.type || '').startsWith('bot_')
 
 // Поля, гарантированно доступные на входе блока: пересечение по всем входящим путям
 // (в общий блок могут сходиться ветки с разным набором полей).
@@ -132,7 +134,10 @@ const BRANCHES = {
   bot_download: ['ok', 'error'], bot_delay: ['now', 'later'],
   repeat: ['body', 'done'], while: ['body', 'done'],
 }
-const branchesOf = (n) => (n.type === 'bot_menu' ? [...(n.data.buttons || []).map((b) => b.id), 'timeout'] : BRANCHES[n.type])
+const branchesOf = (n) => {
+  const base = n.type === 'bot_menu' ? [...(n.data.buttons || []).map((b) => b.id), 'timeout'] : BRANCHES[n.type]
+  return n.data?.on_error?.then === 'branch' ? [...(base || [null]), 'error'] : base
+}
 function autoLayout(allNodes, edges) {
   const nodes = allNodes.filter((n) => !isDecor(n)) // рамки и заметки остаются на месте
   const COL = 290
@@ -748,6 +753,13 @@ function Editor({ catalogs, projectId, onProjectsChanged, me }) {
     markDirty()
     setTimeout(() => fitView({ padding: 0.15, maxZoom: 1, duration: 300 }), 50)
   }
+
+  // выход «ошибка» выключили в «Если шаг не удался» — его связи больше не нужны
+  useEffect(() => {
+    const branchy = new Set(nodes.filter((n) => n.data?.on_error?.then === 'branch').map((n) => n.id))
+    if (edges.some((e) => e.sourceHandle === 'error' && !branchy.has(e.source) && !isBotNode(nodes, e.source)))
+      setEdges((es) => es.filter((e) => e.sourceHandle !== 'error' || branchy.has(e.source) || isBotNode(nodes, e.source)))
+  }, [nodesKey]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const collapse = useMemo(() => hiddenByCollapse(nodes, edges), [nodesKey, edgesKey]) // eslint-disable-line react-hooks/exhaustive-deps
   const toggleCollapse = useCallback((id) => {

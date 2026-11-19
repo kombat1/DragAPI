@@ -118,7 +118,7 @@ class Agent:
         return {"type": "hello", "name": self.name, "version": VERSION,
                 "platform": f"{platform.system()} {platform.release()}", "screen": screen,
                 "stop_hotkey": "+".join(self.stop_keys), "error": self.driver_error,
-                "capabilities": ["input", "record", "hotkeys", "pick_point", "vision", "windows"]}
+                "capabilities": ["input", "record", "hotkeys", "pick_point", "vision", "windows", "retry"]}
 
     def start(self):
         """Глобальный слушатель клавиатуры: аварийная остановка и горячие клавиши сценариев."""

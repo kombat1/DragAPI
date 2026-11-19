@@ -192,11 +192,23 @@ export function RunsPanel({ projectId, graph, scenarios, agentId, readOnly, onSe
               {run.events.map((e, i) => (
                 <div
                   key={i}
-                  className={`run-event ${e.status === 'error' ? 'bad' : ''} ${e.type === 'log' ? 'log' : ''}`}
+                  className={`run-event ${e.status === 'error' ? 'bad' : ''} ${e.type === 'log' ? 'log' : ''} ${['retry', 'failed'].includes(e.status) ? 'warn' : ''} ${e.status === 'recovered' ? 'good' : ''}`}
                   onClick={() => e.node && onSelectNode(e.node)}
                 >
                   <span className="muted">{fmtTime(e.t)}</span>{' '}
-                  {e.type === 'log' ? <>✎ {e.message}</> : e.status === 'error' ? <>✖ {e.message}</> : <>▸ {title(e.op)}</>}{' '}
+                  {e.type === 'log' ? (
+                    <>✎ {e.message}</>
+                  ) : e.status === 'error' ? (
+                    <>✖ {e.message}</>
+                  ) : e.status === 'retry' ? (
+                    <>↻ {title(e.op)}: {e.message}</>
+                  ) : e.status === 'recovered' ? (
+                    <>✓ {title(e.op)}: {e.message}</>
+                  ) : e.status === 'failed' ? (
+                    <>⚠ {title(e.op)}: {e.message}</>
+                  ) : (
+                    <>▸ {title(e.op)}</>
+                  )}{' '}
                   <span className="muted">{e.node}</span>
                 </div>
               ))}

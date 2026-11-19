@@ -209,6 +209,18 @@ AUTO_BLOCKS: dict[str, dict] = {
         "defaults": {"assignments": [{"target": "n", "expr": "0"}]},
         "fields": [F(key="assignments", label="Присваивания", kind="assignments")],
     },
+    "call_scenario": {
+        "title": "Выполнить сценарий", "group": "Логика", "color": "#0ea5e9", "icon": "↪",
+        "description": "Подпрограмма: выполнить другой сценарий проекта с параметрами и взять его переменные.",
+        "inputs": ["flow"], "output": ["flow"],
+        "defaults": {"scenario": "", "params": [], "target": "result"},
+        "fields": [F(key="scenario", label="Сценарий", kind="scenario",
+                     hint="Имя другого сценария этого проекта (его «Старт»)"),
+                   F(key="params", label="Параметры", kind="kv",
+                     hint="Входные параметры вызываемого «Старта»: имя → выражение"),
+                   F(key="target", label="Результат — в переменную", kind="text", optional=True,
+                     hint="Переменные сценария после выполнения: result['total']")],
+    },
     "log": {
         "title": "Сообщение в лог", "group": "Логика", "color": "#64748b", "icon": "✎",
         "description": "Записать строку в лог запуска: «Шаг {i} из {n}».",
@@ -385,6 +397,43 @@ AUTO_BLOCKS: dict[str, dict] = {
 }
 
 
+# «Если шаг не удался»: у всех блоков, кроме этих (у циклов ошибки — в теле, «Старт» и «Завершить» не падают)
+NO_RETRY = {"trigger", "stop", "repeat", "while"}
+ON_ERROR_THEN = ["stop", "skip", "branch"]
+MAX_RETRIES = 100
+
+
+def on_error_policy(data: dict, fail) -> dict | None:
+    """data["on_error"] -> {retries, delay, then, var} или None (по умолчанию: без повторов, остановить)."""
+    raw = data.get("on_error")
+    if not isinstance(raw, dict):
+        return None
+    out = {"then": raw.get("then") or "stop", "var": str(raw.get("var") or "error").strip() or "error"}
+    if out["then"] not in ON_ERROR_THEN:
+        fail(f"если шаг не удался: неизвестное действие «{out['then']}»")
+        return None
+    try:
+        out["retries"] = int(str(raw.get("retries") or 0).strip())
+        if not 0 <= out["retries"] <= MAX_RETRIES:
+            raise ValueError
+    except ValueError:
+        fail(f"повторить: целое число от 0 до {MAX_RETRIES}")
+        return None
+    try:
+        out["delay"] = float(str(raw.get("delay") or 0).strip().replace(",", "."))
+        if not 0 <= out["delay"] <= 3600:
+            raise ValueError
+    except ValueError:
+        fail("пауза между попытками: от 0 до 3600 секунд")
+        return None
+    if msg := _check_ident(out["var"], "переменная с ошибкой"):
+        fail(msg)
+        return None
+    if out["retries"] == 0 and out["then"] == "stop":
+        return None
+    return out
+
+
 def can_connect(source_type: str, target_type: str) -> bool:
     src, dst = AUTO_BLOCKS.get(source_type), AUTO_BLOCKS.get(target_type)
     return bool(src and dst and set(src["output"]) & set(dst["inputs"]))
@@ -420,10 +469,34 @@ class Scenario:
     steps: list[dict]
     code: dict[str, dict] = field(default_factory=dict)   # node -> код и лимиты (выполняет сервер)
     http: dict[str, dict] = field(default_factory=dict)   # node -> метод/таймаут (выполняет сервер)
+    calls: set[str] = field(default_factory=set)          # сценарии, которые он вызывает напрямую
+    subs: dict[str, dict] = field(default_factory=dict)   # все вызываемые (и их вызовы): имя -> {params, steps}
 
     def plan(self) -> dict:
         """То, что уходит агенту: без кода (его выполняет сервер)."""
-        return {"name": self.trigger.name, "trigger": self.trigger.node, "steps": self.steps}
+        plan = {"name": self.trigger.name, "trigger": self.trigger.node, "steps": self.steps}
+        if self.subs:
+            plan["subs"] = self.subs
+        return plan
+
+    @property
+    def needs_new_agent(self) -> bool:
+        """План использует повторы, ветку «ошибка» или подпрограммы — старый агент их не поймёт."""
+        return bool(self.subs) or _uses(self.steps, lambda st: "on_error" in st or st.get("op") == "call_scenario")
+
+
+def _uses(steps, pred) -> bool:
+    for st in steps or []:
+        if pred(st) or any(_uses(st.get(k), pred) for k in ("then", "else", "body", "next", "on_fail")):
+            return True
+    return False
+
+
+def iter_plan_steps(steps):
+    for st in steps or []:
+        yield st
+        for k in ("then", "else", "body", "next", "on_fail"):
+            yield from iter_plan_steps(st.get(k))
 
 
 @dataclass
@@ -586,7 +659,12 @@ def compile_automation(graph: dict) -> CompiledAutomation:
             continue
         branches = [b["id"] for b in AUTO_BLOCKS.get(st, {}).get("branches", [])]
         handle = e.get("sourceHandle") if branches else None
-        if branches and handle not in branches:
+        if e.get("sourceHandle") == "error":
+            handle = "error"
+            if ((nodes[s].get("data") or {}).get("on_error") or {}).get("then") != "branch":
+                err(s, "выход «ошибка» работает, только если в «Если шаг не удался» выбрано «перейти по ветке «ошибка»»")
+                continue
+        elif branches and handle not in branches:
             err(s, f"связь из неизвестного выхода «{handle}»")
             continue
         if (s, handle) in outgoing:
@@ -629,7 +707,9 @@ def compile_automation(graph: dict) -> CompiledAutomation:
             continue
         if not steps:
             warn(nid, "к блоку «Старт» ничего не подключено — сценарий пустой")
-        scenarios.append(Scenario(trig, steps, walker.code, walker.http))
+        scenarios.append(Scenario(trig, steps, walker.code, walker.http, walker.calls))
+
+    _link_calls(scenarios, nodes, names_seen, err, warn)
 
     errors, seen = [], set()
     for i in issues:
@@ -646,6 +726,54 @@ def compile_automation(graph: dict) -> CompiledAutomation:
     return CompiledAutomation(str(graph.get("name") or ""), scenarios, env, settings, warnings,
                               sandbox_settings, packages, bool(libraries.get("only_binary", True)), firewall,
                               telegram)
+
+
+MAX_CALL_DEPTH = 20
+
+
+def _link_calls(scenarios: list[Scenario], nodes: dict, names_seen: dict, err, warn):
+    """Подпрограммы: проверить вызовы, запретить рекурсию и приложить к каждому плану вызываемые сценарии
+    (вместе с их Python-кодом и HTTP-блоками — их выполняет сервер)."""
+    by_name = {s.trigger.name: s for s in scenarios}
+    for sc in scenarios:
+        for st in iter_plan_steps(sc.steps):
+            if st.get("op") != "call_scenario":
+                continue
+            callee = by_name.get(st["scenario"])
+            if callee is None:
+                err(st["node"], f"сценария «{st['scenario']}» нет" + (" — в нём ошибки" if st["scenario"] in names_seen else ""))
+                continue
+            declared = set(callee.trigger.params)
+            given = {p["key"] for p in st.get("params") or []}
+            for extra in sorted(given - declared):
+                err(st["node"], f"у сценария «{callee.trigger.name}» нет параметра «{extra}» — объявите его в его «Старте»")
+            for missing in sorted(declared - given):
+                warn(st["node"], f"параметр «{missing}» сценария «{callee.trigger.name}» не передан — будет пустым")
+
+    def chain(name, stack):
+        """Все сценарии, вызываемые из name (транзитивно); цикл — ошибка."""
+        found = set()
+        for callee in sorted(by_name[name].calls):
+            if callee not in by_name:
+                continue
+            if callee in stack:
+                loop = " → ".join([*stack[stack.index(callee):], callee])
+                node = next((st["node"] for st in iter_plan_steps(by_name[name].steps)
+                             if st.get("op") == "call_scenario" and st.get("scenario") == callee), None)
+                err(node, f"сценарии вызывают друг друга по кругу: {loop}")
+                continue
+            if len(stack) >= MAX_CALL_DEPTH:
+                err(None, f"слишком глубокая вложенность подпрограмм (больше {MAX_CALL_DEPTH})")
+                continue
+            found |= {callee} | chain(callee, stack + [callee])
+        return found
+
+    for sc in scenarios:
+        for name in sorted(chain(sc.trigger.name, [sc.trigger.name])):
+            callee = by_name[name]
+            sc.subs[name] = {"params": list(callee.trigger.params), "steps": callee.steps}
+            sc.code.update(callee.code)
+            sc.http.update(callee.http)
 
 
 def _trigger(nid: str, data: dict, err) -> Trigger | None:
@@ -710,6 +838,7 @@ class _Walker:
         self.ok = True
         self.code: dict[str, dict] = {}
         self.http: dict[str, dict] = {}
+        self.calls: set[str] = set()
 
     def fail(self, nid, msg):
         self.ok = False
@@ -737,13 +866,23 @@ class _Walker:
             if ntype == "trigger":
                 self.fail(cur, "«Старт» может быть только началом сценария")
                 return None
+            policy = self._policy(cur, ntype, data)
+            on_fail = None
+            if policy and policy["then"] == "branch":
+                start = self.outgoing.get((cur, "error"))
+                if start is None:
+                    self.warn(cur, "ветка «ошибка» не подключена — при ошибке сценарий остановится")
+                else:
+                    on_fail = self.walk(start, frozenset(path), loop)
+                    if on_fail is None:
+                        return None
             if ntype in ("condition", "tg_ask", "image_find", "pixel_check", "window_find"):
                 step = self._step(cur, ntype, data)
                 then = self.walk(self.outgoing.get((cur, "true")), frozenset(path), loop)
                 other = self.walk(self.outgoing.get((cur, "false")), frozenset(path), loop)
                 if step is not None and then is not None and other is not None:
                     op = "if" if ntype == "condition" else ntype
-                    steps.append({**step, "op": op, "then": then, "else": other})
+                    steps.append(self._with_policy({**step, "op": op, "then": then, "else": other}, policy, on_fail))
                 return steps   # продолжение — внутри веток
             if ntype in ("repeat", "while"):
                 step = self._step(cur, ntype, data)
@@ -756,12 +895,31 @@ class _Walker:
                 cur = self.outgoing.get((cur, "done"))
                 continue
             step = self._step(cur, ntype, data)
+            if on_fail is not None:
+                # шаг с веткой «ошибка» — развилка: продолжение после успеха (next) или ветка «ошибка»
+                nxt = self.walk(self.outgoing.get((cur, None)), frozenset(path), loop)
+                if step is not None and nxt is not None:
+                    steps.append(self._with_policy({**step, "next": nxt}, policy, on_fail))
+                return steps if nxt is not None else None
             if step is not None:   # с ошибкой — идём дальше, чтобы показать ошибки всех блоков сразу
-                steps.append(step)
+                steps.append(self._with_policy(step, policy, None))
             if ntype == "stop":
                 return steps
             cur = self.outgoing.get((cur, None))
         return steps
+
+    def _policy(self, nid, ntype, data):
+        if ntype in NO_RETRY:
+            return None
+        return on_error_policy(data, lambda m: self.fail(nid, m))
+
+    @staticmethod
+    def _with_policy(step, policy, on_fail):
+        if policy:
+            step["on_error"] = policy
+        if on_fail is not None:
+            step["on_fail"] = on_fail
+        return step
 
     def _step(self, nid: str, ntype: str, data: dict) -> dict | None:
         spec = self.blocks[ntype]
@@ -860,6 +1018,12 @@ class _Walker:
                 if not re.fullmatch(r"#?[0-9a-fA-F]{6}", text):
                     fail(f"«{label}»: цвет в формате #RRGGBB, например #22c55e")
                 step[key] = "#" + text.lstrip("#").lower()
+            elif kind == "scenario":
+                value = str(value or "").strip()
+                if not value:
+                    fail("«Сценарий»: выберите, какой сценарий выполнить")
+                step[key] = value
+                self.calls.add(value)
             elif kind == "kv":
                 items = []
                 for a in value or []:

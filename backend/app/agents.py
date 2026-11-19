@@ -456,7 +456,8 @@ class AgentHub:
                 raise RuntimeError(f"Python-код: {r.error}")
             return apply_code_result(r.result, spec["outputs"])
         if op in ("tg_send", "tg_ask"):
-            step = _find_step(scenario.steps if scenario else [], node)
+            step = _find_step(scenario.steps if scenario else [], node) or next(
+                (st for sub in (scenario.subs.values() if scenario else []) if (st := _find_step(sub["steps"], node))), None)
             if step is None:
                 raise RuntimeError("нет такого Telegram-блока в сценарии")
             token = project.telegram_token
@@ -525,6 +526,9 @@ class AgentHub:
                 f"локальный агент недоступен{': ' + self.local_error if self.local_error else ''}"
         elif conn.run_id is not None:
             problem = "агент занят другим сценарием"
+        elif scenario.needs_new_agent and "retry" not in ((conn.info or {}).get("capabilities") or []):
+            problem = ("агент устарел: повторы шагов, ветку «ошибка» и подпрограммы он не выполнит — "
+                       "скачайте агента заново («🖥 Агенты» → zip) и перезапустите его")
         missing = [p for p in scenario.trigger.params if p not in inputs]
         if problem is None and missing:
             problem = "не переданы параметры: " + ", ".join(missing)
@@ -713,7 +717,7 @@ def _find_step(steps: list[dict], node: str) -> dict | None:
     for step in steps:
         if step.get("node") == node:
             return step
-        for key in ("then", "else", "body"):
+        for key in ("then", "else", "body", "next", "on_fail"):
             found = _find_step(step.get(key) or [], node)
             if found:
                 return found

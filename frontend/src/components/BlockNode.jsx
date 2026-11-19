@@ -150,9 +150,16 @@ export default function BlockNode({ id, type, data, selected }) {
   const issues = data.__issues || []
   // у «Меню» выходы — по кнопкам: сколько кнопок, столько выходов
   const dyn = spec.dynamic_branches
-  const branches = dyn
+  const baseBranches = dyn
     ? [...(data[dyn.field] || []).map((b) => ({ id: b.id, label: b.text || '…' })), ...dyn.extra]
     : spec.branches
+  // «Если шаг не удался → перейти по ветке «ошибка»»: у блока появляется выход «ошибка»
+  const policy = !catalog.bot && catalog.automation ? data.on_error : null
+  const errorBranch = policy?.then === 'branch'
+  const branches = errorBranch
+    ? [...(baseBranches || [{ id: undefined, label: 'дальше' }]), { id: 'error', label: 'ошибка' }]
+    : baseBranches
+  const retries = Number(policy?.retries) || 0
   const level = issues.some((i) => i.level === 'error') ? 'error' : issues.length ? 'warning' : ''
   return (
     <div
@@ -173,6 +180,12 @@ export default function BlockNode({ id, type, data, selected }) {
           {spec.icon ? <span className="block-icon">{spec.icon}</span> : null}
           {spec.title}
         </span>
+        {(retries > 0 || policy?.then === 'skip') && (
+          <span className="retry-badge" title={`Если шаг не удался: ${retries ? `повторить ${retries} раз` : ''}${policy.then === 'skip' ? ' и пропустить' : policy.then === 'branch' ? ' и уйти в «ошибку»' : ''}`}>
+            {retries > 0 ? `↻${retries}` : ''}
+            {policy.then === 'skip' ? '⤼' : ''}
+          </span>
+        )}
         {data.__run && (
           <button
             className="collapse-toggle nodrag"
@@ -212,7 +225,7 @@ export default function BlockNode({ id, type, data, selected }) {
       {branches
         ? branches.map((b, i) => (
             <Handle
-              key={b.id}
+              key={b.id ?? '__next'}
               id={b.id}
               type="source"
               position={Position.Right}

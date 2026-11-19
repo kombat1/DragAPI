@@ -702,3 +702,16 @@ button.link { border: none; background: none; color: var(--primary); padding: 0 
 .db-table { display: flex; gap: 8px; align-items: baseline; }
 .db-table input { width: auto; }
 @media (max-width: 700px) { .db-tab .kind-choice { grid-template-columns: 1fr; } }
+
+/* ---------- «Если шаг не удался» ---------- */
+.on-error { border: 1px dashed var(--border); border-radius: 8px; padding: 6px 10px; margin-top: 10px; }
+.on-error.on { border-style: solid; border-color: color-mix(in srgb, var(--warn) 50%, var(--border)); }
+.on-error summary { cursor: pointer; font-weight: 600; font-size: 12.5px; }
+.on-error-row { align-items: center; gap: 6px; margin: 8px 0; }
+.on-error-row input { width: 64px; }
+.retry-badge { font-size: 11px; font-weight: 700; color: var(--warn); margin-left: auto; padding: 0 4px; }
+.react-flow__handle.branch-error { border-color: var(--warn); }
+.branch-error .handle-label { color: var(--warn); }
+.react-flow__edge.branch-error .react-flow__edge-path { stroke: var(--warn); stroke-dasharray: 5 4; }
+.run-event.warn { color: var(--warn); }
+.run-event.good { color: var(--ok); }

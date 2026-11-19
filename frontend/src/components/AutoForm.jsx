@@ -1,3 +1,4 @@
+import { useCatalog } from '../catalog.js'
 import { useEffect, useRef, useState } from 'react'
 import { api } from '../api.js'
 import ListEditor from './ListEditor.jsx'
@@ -135,7 +136,58 @@ function visible(f, d, defaults) {
   return Object.entries(f.show_if).every(([k, vals]) => vals.includes(d[k] ?? defaults[k]))
 }
 
+// «Если шаг не удался»: у всех блоков автоматизации, кроме этих
+const NO_RETRY = new Set(['trigger', 'stop', 'repeat', 'while'])
+const ON_ERROR_THEN = [
+  ['stop', 'остановить сценарий с ошибкой'],
+  ['skip', 'пропустить шаг и идти дальше'],
+  ['branch', 'перейти по ветке «ошибка»'],
+]
+
+function OnError({ d, set }) {
+  const p = { retries: '0', delay: '1', then: 'stop', var: 'error', ...(d.on_error || {}) }
+  const put = (patch) => set({ on_error: { ...p, ...patch } })
+  const active = Number(p.retries) > 0 || p.then !== 'stop'
+  return (
+    <details className={`on-error ${active ? 'on' : ''}`} open={active}>
+      <summary>
+        Если шаг не удался
+        {active && (
+          <span className="muted">
+            {' '}
+            · {Number(p.retries) > 0 ? `повторить ${p.retries}×` : 'без повторов'} → {ON_ERROR_THEN.find(([k]) => k === p.then)?.[1]}
+          </span>
+        )}
+      </summary>
+      <div className="list-row on-error-row">
+        <span>Повторить</span>
+        <input className="mono" type="number" min="0" max="100" value={p.retries} onChange={(e) => put({ retries: e.target.value })} />
+        <span>раз, пауза</span>
+        <input className="mono" type="number" min="0" step="0.5" value={p.delay} onChange={(e) => put({ delay: e.target.value })} />
+        <span>с</span>
+      </div>
+      <Field label="Если так и не получилось">
+        <select value={p.then} onChange={(e) => put({ then: e.target.value })}>
+          {ON_ERROR_THEN.map(([k, label]) => (
+            <option key={k} value={k}>
+              {label}
+            </option>
+          ))}
+        </select>
+      </Field>
+      {p.then !== 'stop' && (
+        <Field label="Ошибку — в переменную" hint={`${p.var || 'error'}['message'] — текст ошибки, ['attempts'] — сколько было попыток. Пригодится, чтобы отправить её в Telegram.`}>
+          <input className="mono" value={p.var} onChange={(e) => put({ var: e.target.value })} />
+        </Field>
+      )}
+      {p.then === 'branch' && <div className="hint">У блока появится выход «ошибка» — подключите к нему, что делать при сбое.</div>}
+      <div className="hint">Повторяется только сам этот шаг. Лимиты сценария по времени и числу действий не повторяются.</div>
+    </details>
+  )
+}
+
 export default function AutoForm({ spec, d, set, projectId, agent, variables, roles = [], nodeId, nodeType, graph, readOnly = false }) {
+  const catalog = useCatalog()
   const fields = spec.fields.filter((f) => visible(f, d, spec.defaults))
   const out = []
   for (let i = 0; i < fields.length; i++) {
@@ -163,8 +215,9 @@ export default function AutoForm({ spec, d, set, projectId, agent, variables, ro
       i++
       continue
     }
-    out.push(<FieldInput key={f.key} f={f} d={d} set={set} variables={variables} roles={roles} projectId={projectId} agent={agent} readOnly={readOnly} />)
+    out.push(<FieldInput key={f.key} f={f} d={d} set={set} variables={variables} roles={roles} projectId={projectId} agent={agent} readOnly={readOnly} graph={graph} />)
   }
+  if (catalog?.automation && !catalog?.bot && !NO_RETRY.has(nodeType)) out.push(<OnError key="__on_error" d={d} set={set} />)
   if ((spec.group === 'Зрение' || nodeType === 'window_find') && graph && nodeId) {
     out.push(
       d.window ? (
@@ -179,7 +232,7 @@ export default function AutoForm({ spec, d, set, projectId, agent, variables, ro
   return <>{out}</>
 }
 
-function FieldInput({ f, d, set, variables, roles, projectId, agent, readOnly }) {
+function FieldInput({ f, d, set, variables, roles, projectId, agent, readOnly, graph }) {
   const value = d[f.key]
   const put = (v) => set({ [f.key]: v })
   switch (f.kind) {
@@ -369,6 +422,27 @@ function FieldInput({ f, d, set, variables, roles, projectId, agent, readOnly })
           <LinksInput value={value} onChange={put} ListEditor={ListEditor} />
         </Field>
       )
+    case 'scenario': {
+      const triggers = (graph?.nodes || []).filter((n) => n.type === 'trigger' && n.data?.name)
+      const callee = triggers.find((n) => n.data.name === value)
+      const params = callee?.data.params || []
+      return (
+        <Field
+          label={f.label}
+          hint={callee ? (params.length ? `Параметры его «Старта»: ${params.join(', ')} — задайте их ниже.` : 'У его «Старта» нет параметров.') : f.hint}
+        >
+          <select value={value ?? ''} onChange={(e) => put(e.target.value)}>
+            <option value="">— выберите сценарий —</option>
+            {triggers.map((n) => (
+              <option key={n.id} value={n.data.name}>
+                {n.data.name}
+              </option>
+            ))}
+            {value && !callee && <option value={value}>{value} (нет такого)</option>}
+          </select>
+        </Field>
+      )
+    }
     case 'automation_project':
       return (
         <Field label={f.label} hint={f.hint}>
@@ -459,6 +533,8 @@ function summaryText(type, d) {
       return d.status === 'error' ? `ошибка${d.message ? `: ${d.message}` : ''}` : 'успех'
     case 'http':
       return `${d.method} ${d.url} → ${d.target}`
+    case 'call_scenario':
+      return d.scenario ? `↪ ${d.scenario}(${(d.params || []).map((p) => p.key).join(', ')})${d.target ? ` → ${d.target}` : ''}` : '⚠ сценарий не выбран'
     case 'image_find': {
       const what = d.image ? '' : '⚠ нет образца · '
       const act = d.mode === 'disappear' ? 'ждать, пока исчезнет' : { none: 'найти', click: 'найти и кликнуть', double: 'найти и 2× кликнуть', right: 'найти и правый клик', move: 'найти и навести' }[d.action] || 'найти'
