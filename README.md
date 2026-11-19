@@ -48,14 +48,14 @@
 
 **Linux / macOS**
 ```bash
-git clone https://github.com/<вы>/DragAPI.git
+git clone https://github.com/kombat1/DragAPI.git
 cd DragAPI
 ./start.sh
 ```
 
 **Windows** — двойной щелчок по `start.cmd` или в PowerShell:
 ```powershell
-git clone https://github.com/<вы>/DragAPI.git
+git clone https://github.com/kombat1/DragAPI.git
 cd DragAPI
 .\start.ps1
 ```
