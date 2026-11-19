@@ -307,6 +307,9 @@ export default function Inspector({ node, onChange, onDelete, issues, availableF
           <kbd>Ctrl+C</kbd> / <kbd>Ctrl+V</kbd> — копировать и вставить (можно в другой проект), <kbd>Ctrl+D</kbd> — дублировать,{' '}
           <kbd>Delete</kbd> — удалить. Связи между выделенными блоками копируются вместе с ними.
         </p>
+        <p className="muted">
+          <kbd>Ctrl+G</kbd> — обвести выделенные блоки рамкой с подписью.
+        </p>
       </div>
     )
   }

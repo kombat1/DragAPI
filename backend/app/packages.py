@@ -21,7 +21,7 @@ VERSION = 1
 KINDS = ("api", "automation", "bot")
 MAX_BYTES = 5_000_000
 KEYS = ("nodes", "edges", "models", "env", "sandbox", "libraries", "firewall", "tests", "viewport",
-        "bot", "automation", "telegram")
+        "bot", "automation", "telegram", "frames")
 SECRET_NAME = re.compile(r"TOKEN|SECRET|PASSW|API_?KEY|PRIVATE|CREDENTIAL", re.I)
 
 
@@ -98,13 +98,15 @@ def read_package(raw: bytes | str | dict) -> dict:
         if k not in p:
             continue
         v = p[k]
-        want = list if k in ("nodes", "edges", "models", "env", "tests") else dict
+        want = list if k in ("nodes", "edges", "models", "env", "tests", "frames") else dict
         if v is not None and not isinstance(v, want):
             raise PackageError(f"поле «{k}» повреждено")
         out[k] = v
     for n in out.get("nodes") or []:
         if not isinstance(n, dict) or not isinstance(n.get("id"), str) or not isinstance(n.get("type"), str):
             raise PackageError("повреждён список блоков")
+    if any(not isinstance(f, dict) for f in out.get("frames") or []):
+        raise PackageError("повреждён список рамок")
     for e in out.get("edges") or []:
         if not isinstance(e, dict) or not isinstance(e.get("source"), str) or not isinstance(e.get("target"), str):
             raise PackageError("повреждён список связей")

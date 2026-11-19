@@ -130,3 +130,41 @@ def test_published_export_and_standalone_zip(platform):
 
     api = c.post("/api/projects", json={"name": "API", "kind": "api"}).json()["id"]
     assert c.get(f"/api/projects/{api}/package/standalone").status_code == 400
+
+
+FRAMES = [{"id": "frame-a", "type": "frame", "position": {"x": 0, "y": 0}, "width": 400, "height": 300,
+           "data": {"title": "Оплата", "color": "#059669"}},
+          {"id": "note-b", "type": "note", "position": {"x": 500, "y": 0}, "width": 220, "height": 140,
+           "data": {"text": "Не забыть про возвраты"}}]
+
+
+def test_frames_saved_exported_and_published(platform):
+    """Рамки и заметки: сохраняются, переносятся файлом, попадают в публикацию — и не влияют на бота."""
+    c = platform
+    pid = _bot(c)
+    g = c.get(f"/api/projects/{pid}").json()
+    assert c.post(f"/api/projects/{pid}/bot/publish", json={}).status_code == 200
+    # только оформление поменялось — публиковать нечего
+    assert c.put(f"/api/projects/{pid}", json={**g, "frames": FRAMES}).status_code == 200
+    assert c.get(f"/api/projects/{pid}").json()["frames"] == FRAMES
+    st = c.get(f"/api/projects/{pid}/bot/status").json()
+    assert not st["publish"]["draft_differs"]
+    assert c.post("/api/validate", json={**g, "frames": FRAMES}).json()["ok"]
+    # файл экспорта и импорт
+    pkg = c.get(f"/api/projects/{pid}/package").json()
+    assert pkg["project"]["frames"] == FRAMES
+    new = c.post("/api/import", json={"package": pkg}).json()["project"]["id"]
+    assert c.get(f"/api/projects/{new}").json()["frames"] == FRAMES
+    # снимок публикации хранит рамки
+    g2 = c.get(f"/api/projects/{pid}").json()
+    g2["nodes"][0]["data"] = {**g2["nodes"][0]["data"], "command": "hello"}
+    c.put(f"/api/projects/{pid}", json=g2)
+    c.post(f"/api/projects/{pid}/bot/publish", json={})
+    published = c.get(f"/api/projects/{pid}/package", params={"source": "published"}).json()
+    assert published["project"]["frames"] == FRAMES
+
+
+def test_import_rejects_broken_frames(platform):
+    pkg = {"format": "dragapi.project", "version": 1, "project": {"name": "x", "kind": "api", "frames": ["oops"]}}
+    r = platform.post("/api/import", json={"package": pkg})
+    assert r.status_code == 400 and "рамок" in r.json()["detail"]

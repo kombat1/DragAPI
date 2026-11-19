@@ -2083,7 +2083,8 @@ class Publications:
     def publish(self, project: dict, note: str, by: str | None, diff: dict) -> str:
         self.dir.mkdir(parents=True, exist_ok=True)
         version = str(int(time.time() * 1000))
-        snapshot = {k: project.get(k) for k in ("name", "kind", *GRAPH_KEYS)}
+        # рамки — в снимок (откат вернёт и их), но на «есть неопубликованные изменения» они не влияют
+        snapshot = {k: project.get(k) for k in ("name", "kind", *GRAPH_KEYS, "frames")}
         meta = {"t": time.time(), "note": note[:500], "by": by, "fingerprint": fingerprint(project),
                 "blocks": len(project.get("nodes") or []),
                 "diff": {k: (len(v) if isinstance(v, list) and k != "settings" else v) for k, v in diff.items()}}

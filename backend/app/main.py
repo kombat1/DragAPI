@@ -329,6 +329,7 @@ class GraphIn(BaseModel):
     libraries: dict = {}
     firewall: dict = {}
     tests: list[dict] = []
+    frames: list[dict] = []          # рамки и заметки на холсте — только для людей, на выполнение не влияют
     viewport: dict | None = None
 
 

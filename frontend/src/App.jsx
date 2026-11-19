@@ -26,6 +26,7 @@ import { AgentsModal, RecordModal } from './components/Automation.jsx'
 import { PublishModal } from './components/Bots.jsx'
 import { ExportModal, ImportBox } from './components/Transfer.jsx'
 import { usePasteFiles } from './paste.js'
+import { DECOR_DEFAULTS, DECOR_PALETTE, DecorInspector, FrameNode, NoteNode, frameAround, isDecor, membersOf } from './components/Frames.jsx'
 
 
 const BRANCH_LABELS = {
@@ -132,7 +133,8 @@ const BRANCHES = {
   repeat: ['body', 'done'], while: ['body', 'done'],
 }
 const branchesOf = (n) => (n.type === 'bot_menu' ? [...(n.data.buttons || []).map((b) => b.id), 'timeout'] : BRANCHES[n.type])
-function autoLayout(nodes, edges) {
+function autoLayout(allNodes, edges) {
+  const nodes = allNodes.filter((n) => !isDecor(n)) // рамки и заметки остаются на месте
   const COL = 290
   const ROW = 190
   const byId = Object.fromEntries(nodes.map((n) => [n.id, n]))
@@ -163,7 +165,7 @@ function autoLayout(nodes, edges) {
       x++
     }
   }
-  return nodes.map((n) => ({ ...n, position: pos[n.id] }))
+  return allNodes.map((n) => (pos[n.id] ? { ...n, position: pos[n.id] } : n))
 }
 
 // Блоки, скрытые свёрнутыми эндпоинтами (если блок нужен и развёрнутому эндпоинту — он виден).
@@ -194,13 +196,23 @@ function hiddenByCollapse(nodes, edges) {
   return { hidden, counts }
 }
 
-function Palette({ catalog }) {
+function Palette({ catalog, onFrameSelection, canFrame }) {
   const onDragStart = (e, type) => {
     e.dataTransfer.setData('application/dragapi', type)
     e.dataTransfer.effectAllowed = 'move'
   }
   return (
     <aside className="palette">
+      <div className="decor-row">
+        {DECOR_PALETTE.map(([type, title, desc]) => (
+          <div key={type} className={`decor-chip decor-${type}`} draggable onDragStart={(e) => onDragStart(e, type)} title={`${desc}. Перетащите на холст`}>
+            {title}
+          </div>
+        ))}
+        <button className="small" disabled={!canFrame} onClick={onFrameSelection} title="Выделите блоки (Shift — рамкой, Ctrl — по одному) и обведите их рамкой с подписью (Ctrl+G)">
+          ▭ Обвести
+        </button>
+      </div>
       {Object.entries(
         Object.entries(catalog.blocks).reduce((acc, [type, spec]) => {
           ;(acc[spec.group || 'Блоки'] ||= []).push([type, spec])
@@ -316,7 +328,7 @@ function Editor({ catalogs, projectId, onProjectsChanged, me }) {
       setNodeCounts(null)
       setBottomTab(p.kind === 'automation' ? 'runs' : p.kind === 'bot' ? 'emulator' : 'tests')
       setRunState(null)
-      setNodes(p.nodes || [])
+      setNodes([...(p.frames || []), ...(p.nodes || [])])
       setEdges(p.edges || [])
       setModels(withIds(p.models || []))
       setEnv(p.env || [])
@@ -341,10 +353,14 @@ function Editor({ catalogs, projectId, onProjectsChanged, me }) {
   // ключ без выделения/размеров: выделение блока не должно перепроверять граф и помечать проект изменённым
   const nodesKey = JSON.stringify(nodes.map(cleanNode))
   const edgesKey = JSON.stringify(edges.map(cleanEdge))
-  const graph = useMemo(
-    () => ({ name, kind, automation, telegram, bot, nodes: JSON.parse(nodesKey), edges: JSON.parse(edgesKey), models, env, sandbox, libraries, firewall, tests }),
-    [name, kind, automation, telegram, bot, nodesKey, edgesKey, models, env, sandbox, libraries, firewall, tests],
-  )
+  const graph = useMemo(() => {
+    // рамки и заметки живут на холсте вместе с блоками, а сохраняются отдельно (frames) — на выполнение не влияют
+    const all = JSON.parse(nodesKey)
+    return {
+      name, kind, automation, telegram, bot, nodes: all.filter((n) => !isDecor(n)), frames: all.filter(isDecor),
+      edges: JSON.parse(edgesKey), models, env, sandbox, libraries, firewall, tests,
+    }
+  }, [name, kind, automation, telegram, bot, nodesKey, edgesKey, models, env, sandbox, libraries, firewall, tests])
 
   // живая проверка графа на бэкенде
   useEffect(() => {
@@ -451,7 +467,8 @@ function Editor({ catalogs, projectId, onProjectsChanged, me }) {
 
   const onNodesChange = useCallback((changes) => {
     setNodes((ns) => applyNodeChanges(changes, ns))
-    if (changes.some((c) => c.type !== 'select' && c.type !== 'dimensions' && !(c.type === 'position' && !c.dragging && !c.position)))
+    // размеры меняются и сами (замер блока) — изменением считаем только растягивание рамки или заметки
+    if (changes.some((c) => (c.type === 'dimensions' ? c.setAttributes : c.type !== 'select' && !(c.type === 'position' && !c.dragging && !c.position))))
       setDirty(true)
   }, [])
   const onEdgesChange = useCallback((changes) => {
@@ -493,8 +510,16 @@ function Editor({ catalogs, projectId, onProjectsChanged, me }) {
     (e) => {
       e.preventDefault()
       const type = e.dataTransfer.getData('application/dragapi')
-      if (!type || !catalog.blocks[type]) return
       const position = screenToFlowPosition({ x: e.clientX, y: e.clientY })
+      if (DECOR_DEFAULTS[type]) {
+        const { data, width, height } = DECOR_DEFAULTS[type]
+        const id = `${type}-${uid()}`
+        setNodes((ns) => [...ns, { id, type, position, data: structuredClone(data), width, height }])
+        setSelectedId(id)
+        setDirty(true)
+        return
+      }
+      if (!type || !catalog.blocks[type]) return
       const id = `${type}-${uid()}`
       const data = structuredClone(catalog.blocks[type].defaults)
       setNodes((ns) => [...ns, { id, type, position, data }])
@@ -735,6 +760,56 @@ function Editor({ catalogs, projectId, onProjectsChanged, me }) {
     markDirty()
   }
 
+  // рамка едет вместе с блоками, которые целиком лежат внутри неё
+  const frameDrag = useRef(null)
+  const onNodeDragStart = useCallback(
+    (_, node, dragged) => {
+      const draggedIds = new Set(dragged.map((n) => n.id))
+      const moving = {}
+      for (const d of dragged) {
+        const frame = d.type === 'frame' && nodes.find((n) => n.id === d.id)
+        if (frame) for (const m of membersOf(frame, nodes)) if (!draggedIds.has(m.id)) moving[m.id] = m.position
+      }
+      frameDrag.current = Object.keys(moving).length ? { start: node.position, moving } : null
+    },
+    [nodes],
+  )
+  const onNodeDrag = useCallback((_, node) => {
+    const fd = frameDrag.current
+    if (!fd) return
+    const dx = node.position.x - fd.start.x
+    const dy = node.position.y - fd.start.y
+    setNodes((ns) => ns.map((n) => (fd.moving[n.id] ? { ...n, position: { x: fd.moving[n.id].x + dx, y: fd.moving[n.id].y + dy } } : n)))
+  }, [])
+  const onNodeDragStop = useCallback(
+    (e, node) => {
+      onNodeDrag(e, node)
+      frameDrag.current = null
+    },
+    [onNodeDrag],
+  )
+  const selectedBlocks = nodes.filter((n) => n.selected && !isDecor(n))
+  const frameSelection = () => {
+    if (!selectedBlocks.length) return
+    const id = `frame-${uid()}`
+    const frame = { id, type: 'frame', data: structuredClone(DECOR_DEFAULTS.frame.data), ...frameAround(selectedBlocks), selected: true }
+    setNodes((ns) => [frame, ...ns.map((n) => (n.selected ? { ...n, selected: false } : n))])
+    markDirty()
+    notify('Рамка добавлена — двойной клик по заголовку, чтобы подписать')
+  }
+  useEffect(() => {
+    const h = (e) => {
+      const el = document.activeElement
+      const typing = ['INPUT', 'TEXTAREA', 'SELECT'].includes(el?.tagName) || el?.isContentEditable
+      if (!typing && !readOnly && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'g') {
+        e.preventDefault()
+        frameSelection()
+      }
+    }
+    window.addEventListener('keydown', h)
+    return () => window.removeEventListener('keydown', h)
+  })
+
   const issuesByNode = useMemo(() => {
     const m = {}
     for (const i of validation.issues || []) if (i.node_id) (m[i.node_id] ||= []).push(i)
@@ -762,9 +837,21 @@ function Editor({ catalogs, projectId, onProjectsChanged, me }) {
     setCenter(node.position.x + w / 2, node.position.y + h / 2 - 40, { zoom: Math.max(getZoom(), 0.9), duration: 300 })
   }, [debugStep, getNode, setCenter, getZoom])
 
+  const updateDecor = useCallback((id, patch) => {
+    setNodes((ns) => ns.map((n) => (n.id === id ? { ...n, data: { ...n.data, ...patch } } : n)))
+    setDirty(true)
+  }, [])
   const viewNodes = useMemo(
     () =>
-      nodes.map((n) => ({
+      nodes.map((n) => isDecor(n) ? {
+        ...n,
+        zIndex: n.type === 'frame' ? -1000 : 0, // рамка — под блоками и связями
+        data: {
+          ...n.data,
+          __update: readOnly ? undefined : (patch) => updateDecor(n.id, patch),
+          __count: n.type === 'frame' ? membersOf(n, nodes).filter((m) => !isDecor(m)).length : undefined,
+        },
+      } : ({
         ...n,
         hidden: collapse.hidden.has(n.id),
         data: {
@@ -780,7 +867,7 @@ function Editor({ catalogs, projectId, onProjectsChanged, me }) {
           __run: n.type === 'trigger' && !readOnly ? () => runScenario(n.data.name) : undefined,
         },
       })),
-    [nodes, issuesByNode, activeNodes, debugVisited, debugStep, collapse, toggleCollapse, runVisited, runState, readOnly, nodeCounts], // eslint-disable-line react-hooks/exhaustive-deps
+    [nodes, issuesByNode, activeNodes, debugVisited, debugStep, collapse, toggleCollapse, runVisited, runState, readOnly, nodeCounts, updateDecor], // eslint-disable-line react-hooks/exhaustive-deps
   )
 
   // подписи «да»/«нет» на связях из условия
@@ -811,7 +898,7 @@ function Editor({ catalogs, projectId, onProjectsChanged, me }) {
   }, [edges, debug, runVisited, nodes])
 
   const nodeTypes = useMemo(
-    () => Object.fromEntries(Object.keys(catalog.blocks).map((t) => [t, BlockNode])),
+    () => ({ ...Object.fromEntries(Object.keys(catalog.blocks).map((t) => [t, BlockNode])), frame: FrameNode, note: NoteNode }),
     [catalog],
   )
 
@@ -983,7 +1070,7 @@ function Editor({ catalogs, projectId, onProjectsChanged, me }) {
       </header>
 
       <div className="workspace">
-        {!readOnly && <Palette catalog={catalog} />}
+        {!readOnly && <Palette catalog={catalog} canFrame={selectedBlocks.length > 0} onFrameSelection={frameSelection} />}
         <div className="canvas" ref={wrapper} onDragOver={(e) => e.preventDefault()} onDrop={onDrop}>
           <ReactFlow
             nodes={viewNodes}
@@ -993,6 +1080,9 @@ function Editor({ catalogs, projectId, onProjectsChanged, me }) {
             onEdgesChange={onEdgesChange}
             onConnect={onConnect}
             onConnectEnd={onConnectEnd}
+            onNodeDragStart={onNodeDragStart}
+            onNodeDrag={onNodeDrag}
+            onNodeDragStop={onNodeDragStop}
             isValidConnection={isValidConnection}
             selectionOnDrag={false}
             multiSelectionKeyCode={['Control', 'Meta']}
@@ -1006,10 +1096,19 @@ function Editor({ catalogs, projectId, onProjectsChanged, me }) {
           >
             <Background gap={20} />
             <Controls />
-            <MiniMap pannable zoomable nodeColor={(n) => catalog.blocks[n.type]?.color || '#999'} />
+            <MiniMap pannable zoomable nodeColor={(n) => (isDecor(n) ? 'transparent' : catalog.blocks[n.type]?.color || '#999')} nodeStrokeColor={(n) => (isDecor(n) ? n.data.color || '#999' : 'transparent')} />
           </ReactFlow>
           {toast && <div className={`toast ${toast.kind}`}>{toast.text}</div>}
         </div>
+        {isDecor(selected) ? (
+          <DecorInspector
+            node={selected}
+            readOnly={readOnly}
+            members={membersOf(selected, nodes).filter((m) => !isDecor(m)).length}
+            onChange={(data) => updateNodeData(selected.id, data)}
+            onDelete={() => deleteNode(selected.id)}
+          />
+        ) : (
         <Inspector
           readOnly={readOnly}
           multiCount={selectedNodes.length > 1 ? selectedNodes.length : 0}
@@ -1034,6 +1133,7 @@ function Editor({ catalogs, projectId, onProjectsChanged, me }) {
           onChange={(data) => updateNodeData(selected.id, data)}
           onDelete={() => deleteNode(selected.id)}
         />
+        )}
       </div>
 
       <BottomPanel
@@ -1097,7 +1197,7 @@ function Editor({ catalogs, projectId, onProjectsChanged, me }) {
           dirty={dirty}
           onSave={save}
           catalog={catalog}
-          nodes={nodes}
+          nodes={graph.nodes}
           onClose={() => setPublishOpen(false)}
           onChanged={() => api.botStatus(projectId).then(setBotState).catch(() => {})}
         />
