@@ -687,3 +687,18 @@ textarea.note-text { width: 100%; resize: none; border: none; background: transp
 .bad-text { color: var(--danger); font-weight: 600; }
 .warn-text { color: var(--warn); }
 button.link { border: none; background: none; color: var(--primary); padding: 0 6px; text-transform: none; letter-spacing: 0; }
+
+/* ---------- настройки базы данных ---------- */
+.db-tab { display: flex; flex-direction: column; gap: 12px; }
+.db-tab .kind-choice { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.radio-line { display: flex; gap: 8px; align-items: flex-start; margin: 4px 0; line-height: 1.4; }
+.radio-line input { width: auto; margin-top: 3px; }
+.db-check { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.db-check .issue { margin: 0; }
+.ok-text { color: var(--ok); }
+.db-more summary { cursor: pointer; }
+.db-more input { width: 260px; margin: 4px 0; }
+.db-import { border: 1px solid var(--border); border-radius: 8px; padding: 10px; display: flex; flex-direction: column; gap: 6px; }
+.db-table { display: flex; gap: 8px; align-items: baseline; }
+.db-table input { width: auto; }
+@media (max-width: 700px) { .db-tab .kind-choice { grid-template-columns: 1fr; } }

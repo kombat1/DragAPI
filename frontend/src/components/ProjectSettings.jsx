@@ -5,9 +5,11 @@ import FirewallTab from './FirewallTab.jsx'
 import ListEditor from './ListEditor.jsx'
 import { AutomationTab, TelegramTab } from './Automation.jsx'
 import { BotTab } from './Bots.jsx'
+import DatabaseTab, { dbDefaults } from './DatabaseTab.jsx'
 
 export const SETTINGS_TABS = [
   ['models', 'Модели данных'],
+  ['database', 'База данных'],
   ['env', 'Переменные'],
   ['sandbox', 'Песочница'],
   ['firewall', 'Firewall'],
@@ -25,13 +27,16 @@ const OP_VIEW = {
   extra_column: ['⚠', (o) => <>колонки <code>{o.model}.{o.field}</code> нет в модели — данные в ней сохранены, API её не видит</>, 'muted'],
 }
 
-function SchemaPlan({ projectId, models }) {
+function SchemaPlan({ projectId, models, database, env }) {
   const [ops, setOps] = useState(null)
   const [error, setError] = useState(null)
-  const key = JSON.stringify(models)
+  const db = dbDefaults(database)
+  const pg = db.engine === 'postgres'
+  const existing = pg && db.schema === 'existing'
+  const key = JSON.stringify([models, db, env])
   const refresh = () =>
     api
-      .schemaPlan(projectId, models)
+      .schemaPlan(projectId, models, db, env)
       .then((r) => {
         setOps(r.ops)
         setError(null)
@@ -47,8 +52,13 @@ function SchemaPlan({ projectId, models }) {
   const extra = ops.filter((o) => o.op === 'extra_column')
   return (
     <div className="schema-plan">
-      <div className="field-label">Превью-БД при следующем запуске</div>
-      {ops.length === 0 && <div className="muted">Схема совпадает с моделями — изменений нет.</div>}
+      <div className="field-label">
+        {existing ? 'Существующая база PostgreSQL: расхождения с моделями (схема не меняется)' : pg ? 'PostgreSQL при следующем запуске' : 'Превью-БД при следующем запуске'}
+      </div>
+      {ops.length === 0 && <div className="muted">Схема совпадает с моделями — {existing ? 'всё в порядке' : 'изменений нет'}.</div>}
+      {existing && ops.some((o) => o.op !== 'extra_column') && (
+        <div className="issue error">Модели не совпадают с таблицами — «Запустить» откажется работать. Поправьте модели или импортируйте их во вкладке «База данных».</div>
+      )}
       {ops.map((o, i) => {
         const [icon, text, cls] = OP_VIEW[o.op] || ['·', () => JSON.stringify(o), '']
         return (
@@ -57,12 +67,12 @@ function SchemaPlan({ projectId, models }) {
           </div>
         )
       })}
-      {extra.length > 0 && (
+      {extra.length > 0 && !existing && (
         <button
           className="small danger"
           onClick={async () => {
             if (!confirm(`Удалить колонки ${extra.map((o) => o.model + '.' + o.field).join(', ')} вместе с данными?`)) return
-            await api.schemaDropExtra(projectId, models)
+            await api.schemaDropExtra(projectId, models, db, env)
             refresh()
           }}
         >
@@ -73,7 +83,7 @@ function SchemaPlan({ projectId, models }) {
   )
 }
 
-function ModelsTab({ projectId, models, setModels }) {
+function ModelsTab({ projectId, models, setModels, database, env }) {
   const catalog = useCatalog()
   const names = models.map((m) => m.name).filter(Boolean)
   const setModel = (i, patch) => setModels(models.map((m, j) => (j === i ? { ...m, ...patch } : m)))
@@ -140,7 +150,7 @@ function ModelsTab({ projectId, models, setModels }) {
       >
         + Модель
       </button>
-      <SchemaPlan projectId={projectId} models={models} />
+      <SchemaPlan projectId={projectId} models={models} database={database} env={env} />
     </section>
   )
 }
@@ -444,9 +454,9 @@ function LibrariesTab({ projectId, libraries, setLibraries, sandbox, onInstalled
 
 export default function ProjectSettings({ projectId, project, setProject, issues, sandboxInfo, onClose, onInstalled, initialTab, readOnly = false, kind = 'api' }) {
   const tabs = kind === 'automation'
-    ? [['automation', 'Сценарий'], ['telegram', 'Telegram'], ...SETTINGS_TABS.filter(([k]) => k !== 'models')]
+    ? [['automation', 'Сценарий'], ['telegram', 'Telegram'], ...SETTINGS_TABS.filter(([k]) => k !== 'models' && k !== 'database')]
     : kind === 'bot'
-      ? [['bot', 'Бот'], ...SETTINGS_TABS.filter(([k]) => k !== 'models')]
+      ? [['bot', 'Бот'], ...SETTINGS_TABS.filter(([k]) => k !== 'models' && k !== 'database')]
       : SETTINGS_TABS
   const [tab, setTab] = useState(tabs.some(([k]) => k === initialTab) ? initialTab : tabs[0][0])
 
@@ -514,7 +524,24 @@ export default function ProjectSettings({ projectId, project, setProject, issues
             />
           )}
           {tab === 'models' && (
-            <ModelsTab projectId={projectId} models={project.models} setModels={(models) => setProject({ models })} />
+            <ModelsTab
+              projectId={projectId}
+              models={project.models}
+              setModels={(models) => setProject({ models })}
+              database={project.database}
+              env={project.env}
+            />
+          )}
+          {tab === 'database' && (
+            <DatabaseTab
+              projectId={projectId}
+              database={project.database}
+              setDatabase={(database) => setProject({ database })}
+              env={project.env}
+              setEnv={(env) => setProject({ env })}
+              models={project.models}
+              setModels={(models) => setProject({ models })}
+            />
           )}
           {tab === 'env' && <EnvTab env={project.env} setEnv={(env) => setProject({ env })} />}
           {tab === 'sandbox' && (

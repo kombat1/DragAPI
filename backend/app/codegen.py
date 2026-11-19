@@ -230,8 +230,22 @@ def generate(project: CompiledProject) -> str:
 
     if project.uses_db:
         parts += ["", "# Модели: id полей позволяют переименовывать поля без потери данных (миграции при старте)",
-                  f"MODELS = {[m.as_dict() for m in project.models]!r}",
-                  "db = Database(os.environ.get('DATABASE_URL', 'sqlite:///./app.db'), MODELS)"]
+                  f"MODELS = {[m.as_dict() for m in project.models]!r}"]
+        dbs = project.database
+        if dbs.postgres:
+            url = (f"os.environ.get({dbs.url_env!r}) or " if dbs.url_env != "DATABASE_URL" else "") + \
+                "os.environ.get('DATABASE_URL', 'sqlite:///./app.db')"
+            parts.append(f"# PostgreSQL: строка подключения — в переменной {dbs.url_env} (postgresql://user:pass@host:5432/db)")
+            if dbs.schema == "existing":
+                parts += ["# существующая база: схема не меняется, при старте проверяем, что модели с ней сходятся",
+                          f"db = Database({url}, MODELS, apply_migrations=False)",
+                          "_schema_problems = db.check_schema()",
+                          "if _schema_problems:",
+                          "    raise RuntimeError('модели не совпадают с базой: ' + '; '.join(_schema_problems))"]
+            else:
+                parts.append(f"db = Database({url}, MODELS)")
+        else:
+            parts.append("db = Database(os.environ.get('DATABASE_URL', 'sqlite:///./app.db'), MODELS)")
 
     parts += ["", f"app = FastAPI(title={title!r})"]
     if project.uses_db:
@@ -288,6 +302,8 @@ def requirements(project: CompiledProject) -> str:
     req = "fastapi>=0.110\nuvicorn[standard]>=0.29\npython-multipart>=0.0.9\n"
     if needs_runtime(project):
         req += "sqlalchemy>=2.0\n"
+    if project.uses_db and project.database.postgres:
+        req += "psycopg[binary]>=3.1\n"
     if uses_scenarios(project):
         req += "httpx>=0.27\n"
     if project.packages:
@@ -297,7 +313,10 @@ def requirements(project: CompiledProject) -> str:
 
 def env_example(project: CompiledProject) -> str:
     lines = ["# Переменные окружения проекта"]
-    if project.uses_db:
+    if project.uses_db and project.database.postgres:
+        lines.append(f"# {project.database.url_env} — строка подключения PostgreSQL, например:")
+        lines.append(f"# {project.database.url_env}=postgresql://app:пароль@localhost:5432/shop")
+    elif project.uses_db:
         lines.append("DATABASE_URL=sqlite:///./app.db")
     for e in project.env:
         if e.secret:

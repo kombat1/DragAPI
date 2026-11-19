@@ -127,16 +127,17 @@ class DeployManager:
                                       "started": state.get("StartedAt"), "exit_code": state.get("ExitCode")},
                 "url": f"http://{'localhost' if host == '127.0.0.1' else host}:{port}" if port else None}
 
-    def start(self, pid: str, files: dict[str, str], env: dict[str, str], port: int | None, public: bool) -> Job:
+    def start(self, pid: str, files: dict[str, str], env: dict[str, str], port: int | None, public: bool,
+              host_gateway: bool = False) -> Job:
         job = self.jobs.get(pid)
         if job and job.state == "deploying":
             raise RuntimeError("деплой уже идёт")
         job = Job()
         self.jobs[pid] = job
-        job.task = asyncio.get_running_loop().create_task(self._deploy(pid, files, env, port, public, job))
+        job.task = asyncio.get_running_loop().create_task(self._deploy(pid, files, env, port, public, job, host_gateway))
         return job
 
-    async def _deploy(self, pid, files, env, port, public, job: Job):
+    async def _deploy(self, pid, files, env, port, public, job: Job, host_gateway: bool = False):
         n = names(pid)
         base = DEPLOY_DIR / pid
         src = base / "src"
@@ -166,7 +167,14 @@ class DeployManager:
                 for k, v in env.items():
                     f.write(f"{k}={str(v).replace(chr(10), ' ')}\n")
             bind = "0.0.0.0" if public else "127.0.0.1"
+            extra = []
+            if host_gateway:
+                extra = ["--add-host", "host.docker.internal:host-gateway"]
+                job.write("База PostgreSQL на этой машине: контейнер подключается к ней через host.docker.internal.\n"
+                          "PostgreSQL должен принимать подключения с адреса Docker-сети (listen_addresses и "
+                          "pg_hba.conf), а не только с 127.0.0.1.\n")
             code, _ = await _run(job, "docker", "run", "-d", "--name", n["container"], "--restart", "unless-stopped",
+                                 *extra,
                                  "--label", f"dragapi.project={pid}", "-p", f"{bind}:{port}:8000",
                                  "-v", f"{n['volume']}:/data", "--env-file", str(env_file),
                                  "--security-opt", "no-new-privileges", "--cap-drop", "ALL",

@@ -28,7 +28,7 @@ from starlette.routing import Mount, Router
 
 import asyncio
 
-from . import auth, automation, bots, codegen, packages, sandbox, storage, testing, vault
+from . import auth, automation, bots, codegen, dbsettings, packages, sandbox, storage, testing, vault
 from .agents import LOCAL_ID, agent_bundle, hub
 from .config import ConfigError
 from .deploy import deployments, docker_available
@@ -336,6 +336,7 @@ class GraphIn(BaseModel):
     libraries: dict = {}
     firewall: dict = {}
     tests: list[dict] = []
+    database: dict = {}              # SQLite или PostgreSQL (см. app/dbsettings.py)
     frames: list[dict] = []          # рамки и заметки на холсте — только для людей, на выполнение не влияют
     viewport: dict | None = None
 
@@ -375,13 +376,39 @@ def _compile(project: dict) -> CompiledProject:
         raise HTTPException(400, {"message": "в графе есть ошибки", "issues": [i.as_dict() for i in e.issues]})
 
 
-def _open_db(pid: str, compiled: CompiledProject) -> Database | None:
+def _db_target(pid: str, compiled: CompiledProject, test: bool = False) -> tuple[str, bool]:
+    """Куда подключаться: (url, применять ли миграции). Тестовые запросы из редактора по умолчанию
+    идут в SQLite-копию превью — чтобы «очистить данные» перед тестами не стёрло настоящую базу."""
+    settings = compiled.database
+    if not settings.postgres or (test and not settings.tests_use_db):
+        return storage.db_url(pid), True
+    url = compiled.env_values.get(settings.url_env) or ""
+    if not url:
+        raise HTTPException(400, {"message": f"база данных: не задано значение {settings.url_env} "
+                                             "(Настройки проекта → Переменные)", "issues": []})
+    return url, settings.schema == "manage"
+
+
+def _open_db(pid: str, compiled: CompiledProject, test: bool = False) -> Database | None:
     if not compiled.uses_db:
         return None
+    url, migrate = _db_target(pid, compiled, test)
     try:
-        return Database(storage.db_url(pid), [m.as_dict() for m in compiled.models])
-    except Exception as e:  # noqa: BLE001 — миграция могла не пройти: показываем причину
-        raise HTTPException(400, {"message": f"не удалось подготовить базу данных: {e}", "issues": []})
+        db = Database(url, [m.as_dict() for m in compiled.models], apply_migrations=migrate)
+    except Exception as e:  # noqa: BLE001 — подключение или миграция не прошли: показываем причину
+        raise HTTPException(400, {"message": f"не удалось подготовить базу данных: {dbsettings.connection_error(e)}",
+                                  "issues": []}) from None
+    if not migrate:   # существующая база: схему не трогаем, но проверяем, что модели с ней сходятся
+        try:
+            problems = db.check_schema()
+        except Exception as e:  # noqa: BLE001
+            db.dispose()
+            raise HTTPException(400, {"message": f"база данных: {dbsettings.connection_error(e)}", "issues": []}) from None
+        if problems:
+            db.dispose()
+            raise HTTPException(400, {"message": "модели не совпадают с существующей базой: " + "; ".join(problems)
+                                      + " — поправьте модели или импортируйте их из базы", "issues": []})
+    return db
 
 
 @app.get("/api/blocks")
@@ -747,8 +774,13 @@ async def deploy_start(pid: str, body: DeployIn):
     compiled = _compile(project)
     env = {e.key: e.value for e in compiled.env}
     env["DRAGAPI_LOG_TOKEN"] = secrets.token_urlsafe(24)   # платформа читает журнал запросов контейнера
+    host_gateway = False
+    if compiled.uses_db and compiled.database.postgres and env.get(compiled.database.url_env):
+        # Postgres на этой же машине: из контейнера «localhost» — сам контейнер, нужен адрес хоста
+        env[compiled.database.url_env], host_gateway = dbsettings.for_container(env[compiled.database.url_env])
     try:
-        deployments.start(pid, codegen.generate_files(compiled), env, body.port, body.public)
+        deployments.start(pid, codegen.generate_files(compiled), env, body.port, body.public,
+                          host_gateway=host_gateway)
     except RuntimeError as e:
         raise HTTPException(409, str(e)) from None
     return await deployments.status(pid)
@@ -805,24 +837,48 @@ async def deploy_logs(pid: str, tail: int = 200):
 
 class SchemaIn(BaseModel):
     models: list[dict] = []
+    database: dict | None = None     # текущие (несохранённые) настройки базы и переменные
+    env: list[dict] | None = None
 
 
-def _schema_db(pid: str, models: list[dict]) -> Database:
+def _db_settings(pid: str, database: dict | None, env: list[dict] | None):
+    """Настройки базы и переменные проекта (с секретами) — из запроса или сохранённого проекта."""
+    from .graph import _compile_env
+    stored = _load(pid)
+    graph = _with_secrets(pid, {"env": env if env is not None else stored.get("env") or []})
+    env_vars = _compile_env(graph["env"], lambda *_: None)
+    settings, errors, _ = dbsettings.DatabaseSettings.parse(
+        database if database is not None else stored.get("database"), env_vars)
+    if errors:
+        raise HTTPException(400, {"message": "; ".join(errors), "issues": []})
+    return settings, {e.key: e.value for e in env_vars}
+
+
+def _schema_db(pid: str, models: list[dict], database: dict | None = None, env: list[dict] | None = None) -> Database:
     from .graph import _compile_models
     errors = []
     specs = _compile_models(models, lambda _n, m: errors.append(m))
     if errors:
         raise HTTPException(400, {"message": "; ".join(errors), "issues": []})
-    return Database(storage.db_url(pid), [m.as_dict() for m in specs], apply_migrations=False)
+    settings, values = _db_settings(pid, database, env)
+    url = values.get(settings.url_env) if settings.postgres else storage.db_url(pid)
+    if not url:
+        raise HTTPException(400, {"message": f"не задано значение {settings.url_env}", "issues": []})
+    try:
+        return Database(url, [m.as_dict() for m in specs], apply_migrations=False)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(400, {"message": dbsettings.connection_error(e), "issues": []}) from None
 
 
 @app.post("/api/projects/{pid}/schema/plan")
 def schema_plan(pid: str, body: SchemaIn):
     """Что изменится в превью-БД при следующем запуске (ничего не меняет)."""
     _load(pid)
-    db = _schema_db(pid, body.models)
+    db = _schema_db(pid, body.models, body.database, body.env)
     try:
         return {"ops": db.plan()}
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(400, {"message": dbsettings.connection_error(e), "issues": []}) from None
     finally:
         db.dispose()
 
@@ -831,11 +887,36 @@ def schema_plan(pid: str, body: SchemaIn):
 def schema_drop_extra(pid: str, body: SchemaIn):
     """Удалить колонки, которых больше нет в моделях (данные в них теряются)."""
     _load(pid)
-    db = _schema_db(pid, body.models)
+    settings, _ = _db_settings(pid, body.database, body.env)
+    if settings.postgres and settings.schema == "existing":
+        raise HTTPException(409, "существующая база: платформа не меняет её схему")
+    db = _schema_db(pid, body.models, body.database, body.env)
     try:
         return {"applied": db.migrate(drop_extra=True)}
     finally:
         db.dispose()
+
+
+class DatabaseCheckIn(BaseModel):
+    database: dict | None = None
+    env: list[dict] | None = None
+
+
+@app.post("/api/projects/{pid}/database/inspect")
+def database_inspect(pid: str, body: DatabaseCheckIn):
+    """«Проверить подключение»: версия сервера и таблицы базы — с моделями, которые из них получатся."""
+    settings, values = _db_settings(pid, body.database, body.env)
+    if not settings.postgres:
+        raise HTTPException(400, "проект работает на встроенной SQLite")
+    url = values.get(settings.url_env)
+    if not url:
+        raise HTTPException(400, f"не задано значение {settings.url_env}")
+    try:
+        info = dbsettings.inspect_database(url)
+    except Exception as e:  # noqa: BLE001 — ошибка подключения: показываем понятно и без пароля
+        return {"ok": False, "error": dbsettings.connection_error(e), "url": dbsettings.redact(url)}
+    return {**info, "url": dbsettings.redact(url),
+            "models": dbsettings.models_from_tables(info["tables"])}
 
 
 class _Preview:
@@ -844,7 +925,7 @@ class _Preview:
     def __init__(self, pid: str, graph: GraphIn):
         self.pid = pid
         self.compiled = _compile(_with_secrets(pid, graph.model_dump()))
-        self.db = _open_db(pid, self.compiled)
+        self.db = _open_db(pid, self.compiled, test=True)
         self.log: deque = deque(maxlen=1)
         self.app = build_app(self.compiled, self.db, self.log, lambda: envs.venv(pid),
                              on_network=lambda events: [runner.fw_event(pid, {**e, "source": "тестовый запрос"})

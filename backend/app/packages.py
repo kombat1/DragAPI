@@ -21,7 +21,7 @@ VERSION = 1
 KINDS = ("api", "automation", "bot")
 MAX_BYTES = 5_000_000
 KEYS = ("nodes", "edges", "models", "env", "sandbox", "libraries", "firewall", "tests", "viewport",
-        "bot", "automation", "telegram", "frames")
+        "bot", "automation", "telegram", "frames", "database")
 SECRET_NAME = re.compile(r"TOKEN|SECRET|PASSW|API_?KEY|PRIVATE|CREDENTIAL", re.I)
 
 
@@ -31,8 +31,10 @@ class PackageError(ValueError):
 
 def token_keys(project: dict) -> set[str]:
     """Переменные, в которых по настройкам лежат токены (их значения не экспортируются никогда)."""
-    bot, tg = project.get("bot") or {}, project.get("telegram") or {}
+    bot, tg, db = project.get("bot") or {}, project.get("telegram") or {}, project.get("database") or {}
     names = {bot.get("token_env"), bot.get("test_token_env"), bot.get("payments_env"), tg.get("token_env")}
+    if db.get("engine") == "postgres":   # строка подключения с паролем
+        names.add(db.get("url_env") or "DATABASE_URL")
     return {str(n) for n in names if n}
 
 

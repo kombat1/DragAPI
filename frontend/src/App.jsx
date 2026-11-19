@@ -280,6 +280,7 @@ function Editor({ catalogs, projectId, onProjectsChanged, me }) {
   const [sandbox, setSandbox] = useState({})
   const [libraries, setLibraries] = useState({ packages: [], only_binary: true })
   const [firewall, setFirewall] = useState(DEFAULT_FIREWALL)
+  const [database, setDatabase] = useState({})
   const [tests, setTests] = useState([])
   const [bottomTab, setBottomTab] = useState('tests')
   const [focusEndpoint, setFocusEndpoint] = useState(null)
@@ -335,6 +336,7 @@ function Editor({ catalogs, projectId, onProjectsChanged, me }) {
       setSandbox(p.sandbox || {})
       setLibraries({ packages: [], only_binary: true, ...(p.libraries || {}) })
       setFirewall(normalizeFirewall(p.firewall, p.sandbox?.network))
+      setDatabase(p.database || {})
       setTests(p.tests || [])
       setRole(p.my_role || 'owner')
       setDebug(null)
@@ -358,9 +360,9 @@ function Editor({ catalogs, projectId, onProjectsChanged, me }) {
     const all = JSON.parse(nodesKey)
     return {
       name, kind, automation, telegram, bot, nodes: all.filter((n) => !isDecor(n)), frames: all.filter(isDecor),
-      edges: JSON.parse(edgesKey), models, env, sandbox, libraries, firewall, tests,
+      edges: JSON.parse(edgesKey), models, env, sandbox, libraries, firewall, tests, database,
     }
-  }, [name, kind, automation, telegram, bot, nodesKey, edgesKey, models, env, sandbox, libraries, firewall, tests])
+  }, [name, kind, automation, telegram, bot, nodesKey, edgesKey, models, env, sandbox, libraries, firewall, tests, database])
 
   // живая проверка графа на бэкенде
   useEffect(() => {
@@ -1211,7 +1213,7 @@ function Editor({ catalogs, projectId, onProjectsChanged, me }) {
           projectId={projectId}
           initialTab={settingsOpen}
           kind={kind}
-          project={{ models, env, sandbox, libraries, firewall, automation, telegram, bot }}
+          project={{ models, env, sandbox, libraries, firewall, automation, telegram, bot, database }}
           setProject={(patch) => {
             if (patch.models) {
               // переименования моделей и полей (по постоянным id) переносим в блоки «База данных»
@@ -1223,6 +1225,7 @@ function Editor({ catalogs, projectId, onProjectsChanged, me }) {
             if (patch.sandbox) setSandbox(patch.sandbox)
             if (patch.libraries) setLibraries(patch.libraries)
             if (patch.firewall) setFirewall(patch.firewall)
+            if (patch.database) setDatabase(patch.database)
             if (patch.automation) setAutomation(patch.automation)
             if (patch.telegram) setTelegram(patch.telegram)
             if (patch.bot) setBot(patch.bot)

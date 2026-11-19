@@ -18,6 +18,15 @@ class DatabaseError(Exception):
     """Ошибка данных, понятная клиенту API (нарушена связь, нет записи и т.п.) — отдаётся как 409."""
 
 
+def normalize_db_url(url):
+    """postgres://… и postgresql://… -> драйвер psycopg 3 (его ставит requirements); остальное как есть."""
+    url = str(url or "").strip()
+    for prefix in ("postgres://", "postgresql://"):
+        if url.startswith(prefix):
+            return "postgresql+psycopg://" + url[len(prefix):]
+    return url
+
+
 def _field_id(field):
     return field.get("id") or "name:" + field["name"]
 
@@ -31,6 +40,19 @@ def _ref_name(field_name):
     return field_name[:-3] if field_name.endswith("_id") and len(field_name) > 3 else field_name + "_obj"
 
 
+class _AsDbType(sa.types.TypeDecorator):
+    """Строка для API, настоящий тип в базе (date, timestamp, uuid, jsonb…): CAST(значение AS тип) в SQL."""
+    impl = sa.String
+    cache_ok = False
+
+    def __init__(self, db_type):
+        super().__init__()
+        self.db_type = db_type
+
+    def bind_expression(self, bindvalue):
+        return sa.cast(bindvalue, self.db_type)
+
+
 class Database:
     """Таблицы из моделей проекта. У каждой модели есть автоматический первичный ключ id.
 
@@ -39,8 +61,11 @@ class Database:
     """
 
     def __init__(self, url, models, apply_migrations=True):
+        url = normalize_db_url(url)
         connect_args = {"check_same_thread": False} if url.startswith("sqlite") else {}
-        self.engine = sa.create_engine(url, connect_args=connect_args)
+        if url.startswith("postgresql"):
+            connect_args = {"connect_timeout": 10}
+        self.engine = sa.create_engine(url, connect_args=connect_args, pool_pre_ping=not url.startswith("sqlite"))
         if self.engine.dialect.name == "sqlite":
             # внешние ключи в SQLite включаются на каждое соединение; на выдаче из пула — тоже,
             # чтобы соединение, где их временно выключали (миграция, очистка), не вернулось без проверки
@@ -54,16 +79,34 @@ class Database:
         self.models = {m["name"]: m for m in models}
         self.metadata = sa.MetaData()
         self.tables = {}
+        # существующая база PostgreSQL: строковые поля моделей в колонках date, uuid, jsonb… —
+        # значения приводятся к настоящему типу колонки прямо в SQL
+        db_types = self._reflect_types() if not apply_migrations and self._pg else {}
         for model in models:
-            self.tables[model["name"]] = self._table(model, model["name"], self.metadata)
+            self.tables[model["name"]] = self._table(model, model["name"], self.metadata, db_types)
         self.applied = self.migrate() if apply_migrations else []
 
-    def _table(self, model, name, metadata):
+    def _reflect_types(self):
+        out = {}
+        try:
+            with self.engine.connect() as conn:
+                insp = sa.inspect(conn)
+                for name in self.models:
+                    if insp.has_table(name):
+                        out[name] = {c["name"]: c["type"] for c in insp.get_columns(name)}
+        except sa.exc.DBAPIError:
+            return {}   # нет связи — ошибку покажет первый запрос
+        return out
+
+    def _table(self, model, name, metadata, db_types=None):
         columns = [sa.Column("id", sa.Integer, primary_key=True, autoincrement=True)]
+        actual = (db_types or {}).get(name, {})
         for f in model["fields"]:
             if f["type"] == "ref":
                 fk = sa.ForeignKey(f'{f["ref"]}.id', ondelete=ON_DELETE[f.get("on_delete") or "restrict"])
                 columns.append(sa.Column(f["name"], sa.Integer, fk, nullable=True))
+            elif f["type"] == "str" and f["name"] in actual and not isinstance(actual[f["name"]], sa.String):
+                columns.append(sa.Column(f["name"], _AsDbType(actual[f["name"]]), nullable=True))
             else:
                 columns.append(sa.Column(f["name"], DB_TYPES[f["type"]], nullable=True))
         # sqlite_autoincrement: id удалённых записей не выдаются повторно (как serial в PostgreSQL)
@@ -248,6 +291,36 @@ class Database:
         if rows:
             conn.execute(sa.text(f"INSERT INTO {SCHEMA_TABLE} VALUES (:m, :f, :mn, :fn, :t, :r)"), rows)
 
+    @property
+    def _pg(self):
+        return self.engine.dialect.name == "postgresql"
+
+    def check_schema(self):
+        """Существующая база (схему платформа не меняет): чего из моделей в ней нет. -> [строки]"""
+        problems = []
+        with self.engine.connect() as conn:
+            insp = sa.inspect(conn)
+            for name, model in self.models.items():
+                if not insp.has_table(name):
+                    problems.append(f"нет таблицы «{name}»")
+                    continue
+                cols = {c["name"] for c in insp.get_columns(name)}
+                if "id" not in cols:
+                    problems.append(f"в таблице «{name}» нет колонки id (нужен целочисленный первичный ключ id)")
+                missing = [f["name"] for f in model["fields"] if f["name"] not in cols]
+                if missing:
+                    problems.append(f"в таблице «{name}» нет колонок: {', '.join(missing)}")
+        return problems
+
+    def _reset_ids(self, conn, names):
+        """Нумерация id снова с 1 (после очистки таблиц)."""
+        for name in names:
+            if self._pg:
+                conn.execute(sa.text("SELECT setval(pg_get_serial_sequence(:t, 'id'), 1, false) "
+                                     "WHERE pg_get_serial_sequence(:t, 'id') IS NOT NULL"), {"t": f'"{name}"'})
+            elif self.engine.dialect.name == "sqlite" and sa.inspect(conn).has_table("sqlite_sequence"):
+                conn.execute(sa.text("DELETE FROM sqlite_sequence WHERE name = :n"), {"n": name})
+
     # ---------- данные ----------
 
     def _row(self, row):
@@ -287,10 +360,12 @@ class Database:
                 query = query.where(col < value)
             elif op == "lte":
                 query = query.where(col <= value)
-            elif op == "contains":
-                query = query.where(col.contains(str(value), autoescape=True))
+            elif op == "contains":  # без учёта регистра — как LIKE в SQLite
+                query = query.where(col.icontains(str(value), autoescape=True) if self._pg
+                                    else col.contains(str(value), autoescape=True))
             elif op == "startswith":
-                query = query.where(col.startswith(str(value), autoescape=True))
+                query = query.where(col.istartswith(str(value), autoescape=True) if self._pg
+                                    else col.startswith(str(value), autoescape=True))
             elif op == "in":
                 query = query.where(col.in_(list(value or [])))
             elif op == "is_null":
@@ -361,8 +436,7 @@ class Database:
         """Удалить все записи и сбросить счётчик id: после очистки нумерация снова с 1."""
         def op(conn):
             conn.execute(self.tables[model].delete())
-            if self.engine.dialect.name == "sqlite" and sa.inspect(conn).has_table("sqlite_sequence"):
-                conn.execute(sa.text("DELETE FROM sqlite_sequence WHERE name = :n"), {"n": model})
+            self._reset_ids(conn, [model])
         return self._write(op)
 
     def clear_all(self):
@@ -373,8 +447,7 @@ class Database:
                 conn.exec_driver_sql("PRAGMA foreign_keys=OFF")
             for table in reversed(self.metadata.sorted_tables):
                 conn.execute(table.delete())
-            if sqlite and sa.inspect(conn).has_table("sqlite_sequence"):
-                conn.execute(sa.text("DELETE FROM sqlite_sequence"))
+            self._reset_ids(conn, list(self.tables))
             conn.commit()
             if sqlite:
                 conn.exec_driver_sql("PRAGMA foreign_keys=ON")

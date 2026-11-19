@@ -16,6 +16,7 @@ from typing import Any, Iterator, Union
 
 from . import expr
 from .pyenv import validate_packages
+from .dbsettings import DatabaseSettings
 from .firewall import FirewallSettings
 from .sandbox import SandboxSettings
 from .blocks import (
@@ -263,6 +264,7 @@ class CompiledProject:
     only_binary: bool = True
     firewall: FirewallSettings = field(default_factory=FirewallSettings)
     tests: list[dict] = field(default_factory=list)
+    database: DatabaseSettings = field(default_factory=DatabaseSettings)
 
     @property
     def env_values(self) -> dict[str, str]:
@@ -418,7 +420,8 @@ def compile_project(graph: dict) -> CompiledProject:
     libraries = graph.get("libraries") or {}
     packages, package_errors = validate_packages(libraries.get("packages"))
     firewall, firewall_errors = FirewallSettings.parse(graph.get("firewall"), legacy_network=sandbox_settings.network)
-    for message in sandbox_errors + package_errors + firewall_errors:
+    database, db_errors, db_warnings = DatabaseSettings.parse(graph.get("database"), env)
+    for message in sandbox_errors + package_errors + firewall_errors + db_errors:
         err(None, message)
     nodes = {n["id"]: n for n in graph.get("nodes", []) if isinstance(n, dict) and "id" in n}
 
@@ -497,9 +500,11 @@ def compile_project(graph: dict) -> CompiledProject:
     for m in models:
         if m.name not in used_models:
             warnings.append(Issue(None, f"модель «{m.name}» не используется ни одним блоком БД", "warning"))
+    if database.postgres and models:
+        warnings += [Issue(None, w, "warning") for w in db_warnings]
     return CompiledProject(str(graph.get("name") or ""), plans, models, env, warnings,
                            sandbox_settings, packages, bool(libraries.get("only_binary", True)), firewall,
-                           [t for t in tests if t.get("endpoint") in endpoint_ids])
+                           [t for t in tests if t.get("endpoint") in endpoint_ids], database)
 
 
 def compile_graph(graph: dict) -> tuple[list[EndpointPlan], list[Issue]]:
