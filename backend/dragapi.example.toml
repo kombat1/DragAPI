@@ -11,3 +11,18 @@ port = 8765
 # Агент автоматизации на этой машине: сценарии управляют её мышью и клавиатурой.
 # false — только удалённые агенты.
 local_agent = true
+
+# ---- HTTPS и работа на сервере (подробно — deploy/README.md) ----
+# Выберите один вариант.
+#
+# 1) Свой HTTPS платформы: сертификат выпускается сам (data/tls/), браузерам можно доверить data/tls/ca.pem.
+# tls_self_signed = true
+# tls_names = ["dragapi.lan"]          # дополнительные имена в сертификате (свои IP и имя машины — уже там)
+#
+# 2) Свой сертификат (например, от Let's Encrypt):
+# tls_cert = "/etc/letsencrypt/live/example.com/fullchain.pem"
+# tls_key = "/etc/letsencrypt/live/example.com/privkey.pem"
+#
+# 3) HTTPS делает прокси (Caddy, nginx) на этой же машине — host оставьте 127.0.0.1:
+# behind_proxy = true
+# trusted_proxies = "127.0.0.1"         # чьим X-Forwarded-* верить (через запятую)

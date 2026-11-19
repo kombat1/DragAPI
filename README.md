@@ -62,9 +62,10 @@ cd frontend && npm install && npm run build  # или npm run dev — http://loc
 | `DRAGAPI_SECRET_KEY` | ключ шифрования секретов вместо файла `data/secret.key` |
 | `DRAGAPI_SANDBOX` | песочница по умолчанию для режима «авто»: `firejail` или `process` |
 
-Флаги `python -m app`: `--no-auth`, `--no-local-agent`, `--host`, `--port`, `--reload`, `--config FILE`.
+Флаги `python -m app`: `--no-auth`, `--no-local-agent`, `--host`, `--port`, `--reload`, `--config FILE`,
+HTTPS: `--tls-self-signed`, `--tls-cert FILE --tls-key FILE`, `--behind-proxy`.
 Постоянные настройки — в `backend/dragapi.toml` (образец: `backend/dragapi.example.toml`): `auth`, `host`,
-`port`, `local_agent`.
+`port`, `local_agent`, `tls_self_signed`, `tls_cert`, `tls_key`, `tls_names`, `behind_proxy`, `trusted_proxies`.
 Приоритет: флаг > переменная окружения > файл > по умолчанию (вход включён, `127.0.0.1:8765`).
 
 **Без входа** (`--no-auth` или `auth = false`) платформа работает, только пока в ней нет ни одного
@@ -73,6 +74,20 @@ cd frontend && npm install && npm run build  # или npm run dev — http://loc
 
 При первом запуске с включённым входом платформа предлагает создать администратора — ему переходят
 все существующие проекты. **Сделайте резервную копию `data/secret.key`:** без него секреты не расшифровать.
+
+## Запуск на сервере и HTTPS
+
+Подробно — в [deploy/README.md](deploy/README.md). Коротко:
+
+| Как открыть платформу | Команда |
+|---|---|
+| Свой домен, HTTPS через Caddy или nginx (Let's Encrypt) | `deploy/install-service.sh --proxy` + `deploy/Caddyfile` или `deploy/nginx.conf` |
+| Локальная сеть, свой HTTPS платформы | `deploy/install-service.sh --self-signed` или `./start.sh --host 0.0.0.0 --tls-self-signed` |
+| Свой сертификат без прокси | `./start.sh --host 0.0.0.0 --port 443 --tls-cert fullchain.pem --tls-key privkey.pem` |
+
+`install-service.sh` ставит службу systemd: автозапуск, перезапуск при сбое, журнал в `journalctl -u dragapi`.
+Без входа платформа запускается **только на 127.0.0.1**: с `--no-auth` на внешнем адресе или за прокси сервер
+откажется стартовать. По https cookie входа помечается `Secure`.
 
 ## История версий и откат
 

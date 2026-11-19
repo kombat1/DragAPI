@@ -9,10 +9,11 @@ export default defineConfig({
   server: {
     port: Number(process.env.DRAGAPI_FRONT_PORT) || 5173,
     strictPort: true,
+    // secure: false — бэкенд может работать на своём сертификате (--tls-self-signed)
     proxy: {
-      '/api': { target: backend, ws: true }, // ws — подключение удалённых агентов автоматизации
-      '/run': backend,
-      '/hooks': backend,
+      '/api': { target: backend, ws: true, secure: false }, // ws — подключение удалённых агентов автоматизации
+      '/run': { target: backend, secure: false },
+      '/hooks': { target: backend, secure: false },
     },
   },
 })

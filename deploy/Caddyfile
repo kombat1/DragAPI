@@ -1,0 +1,11 @@
+# Caddy: HTTPS с автоматическим сертификатом Let's Encrypt.
+# 1. DNS-запись домена указывает на этот сервер, порты 80 и 443 открыты.
+# 2. Замените dragapi.example.com на свой домен и положите файл в /etc/caddy/Caddyfile.
+# 3. sudo systemctl reload caddy
+# Платформа при этом: behind_proxy = true, host = "127.0.0.1" (install-service.sh --proxy делает так сам).
+
+dragapi.example.com {
+	encode zstd gzip
+	# заголовки X-Forwarded-*, вебсокеты агентов и долгие ответы Caddy проксирует сам
+	reverse_proxy 127.0.0.1:8765
+}

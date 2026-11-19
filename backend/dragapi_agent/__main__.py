@@ -9,9 +9,19 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import ssl
 import sys
 import threading
 import time
+
+
+def _bundled_ca() -> str | None:
+    """platform-ca.pem из zip агента: в папке агента или в текущей."""
+    from pathlib import Path
+    for d in (Path(__file__).resolve().parent.parent, Path.cwd()):
+        if (d / "platform-ca.pem").is_file():
+            return str(d / "platform-ca.pem")
+    return None
 
 
 def main():
@@ -22,6 +32,8 @@ def main():
     ap.add_argument("--name", default="", help="имя этого компьютера в платформе")
     ap.add_argument("--stop-hotkey", default="ctrl+alt+esc", help="аварийная остановка (по умолчанию ctrl+alt+esc)")
     ap.add_argument("--no-notify", action="store_true", help="без системных уведомлений")
+    ap.add_argument("--ca", help="сертификат центра сертификации платформы (её собственный HTTPS); "
+                                 "по умолчанию — platform-ca.pem рядом с агентом, если он есть")
     args = ap.parse_args()
     if not args.token:
         sys.exit("нужен токен: --token или переменная DRAGAPI_AGENT_TOKEN")
@@ -41,6 +53,16 @@ def main():
         print("Внимание: соединение без шифрования (http). Токен и команды видны в сети — "
               "используйте https или доверенную сеть.", file=sys.stderr)
 
+    ssl_ctx = None
+    if url.startswith("wss://"):
+        ca = args.ca or _bundled_ca()
+        ssl_ctx = ssl.create_default_context()
+        if ca:
+            try:
+                ssl_ctx.load_verify_locations(ca)   # вдобавок к системным: подойдёт и Let's Encrypt
+            except (OSError, ssl.SSLError) as e:
+                sys.exit(f"не удалось прочитать сертификат {ca}: {e}")
+
     agent = Agent(name=args.name, stop_hotkey=args.stop_hotkey, notify=not args.no_notify)
     agent.start()
     if agent.driver_error:
@@ -49,7 +71,7 @@ def main():
     while True:
         try:
             with connect(url, additional_headers={"Authorization": f"Bearer {args.token}"},
-                         open_timeout=10, max_size=8 * 1024 * 1024) as ws:
+                         open_timeout=10, max_size=8 * 1024 * 1024, ssl=ssl_ctx) as ws:
                 lock = threading.Lock()
 
                 def send(msg, ws=ws):
@@ -74,6 +96,10 @@ def main():
                 agent.shutdown()
                 sys.exit("платформа не приняла токен агента — проверьте его или выпустите новый")
             print(f"платформа ответила {code}, повтор через {backoff} с", file=sys.stderr)
+        except ssl.SSLCertVerificationError as e:
+            print(f"сертификат платформы не прошёл проверку ({e.verify_message}). Если платформа на своём "
+                  "сертификате (--tls-self-signed) — положите platform-ca.pem из zip агента рядом или укажите "
+                  f"--ca <файл>. Повтор через {backoff} с", file=sys.stderr)
         except (OSError, ConnectionClosed, TimeoutError) as e:
             print(f"нет связи с платформой ({type(e).__name__}: {e}), повтор через {backoff} с", file=sys.stderr)
         except KeyboardInterrupt:

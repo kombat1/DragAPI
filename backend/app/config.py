@@ -4,6 +4,7 @@
     host = "127.0.0.1"
     port = 8765
     local_agent = true  # агент автоматизации на этой машине (нужен графический сеанс X11)
+    tls_self_signed = true / tls_cert = "…" + tls_key = "…" / behind_proxy = true   # HTTPS, см. app/tls.py
 
 Приоритет: флаг командной строки > переменная окружения > этот файл > значение по умолчанию.
 """
@@ -15,7 +16,10 @@ import tomllib
 from pathlib import Path
 
 DEFAULT_PATH = Path(__file__).resolve().parent.parent / "dragapi.toml"
-KNOWN = {"auth": bool, "host": str, "port": int, "local_agent": bool}
+KNOWN = {"auth": bool, "host": str, "port": int, "local_agent": bool,
+         # HTTPS и работа на сервере (см. app/tls.py и deploy/)
+         "tls_cert": str, "tls_key": str, "tls_self_signed": bool, "tls_names": list,
+         "behind_proxy": bool, "trusted_proxies": str}
 
 
 class ConfigError(Exception):
@@ -55,4 +59,6 @@ def _read(p: Path) -> dict:
             raise ConfigError(f"{p}: неизвестный параметр {key!r} (допустимы: {', '.join(KNOWN)})")
         if not isinstance(value, KNOWN[key]) or (KNOWN[key] is int and isinstance(value, bool)):
             raise ConfigError(f"{p}: параметр {key!r} должен быть {KNOWN[key].__name__}")
+        if KNOWN[key] is list and not all(isinstance(v, str) for v in value):
+            raise ConfigError(f"{p}: параметр {key!r} — список строк")
     return raw

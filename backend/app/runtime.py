@@ -415,8 +415,11 @@ async def call_scenario(base_url, project, scenario, token, params, timeout=65):
     if not token:
         raise ScenarioError("не задан токен вебхуков сценария")
     url = f"{str(base_url or 'http://127.0.0.1:8765').rstrip('/')}/hooks/{project}/{scenario}"
+    # своя же платформа по https://127.0.0.1 — сертификат выписан на домен, проверять его тут нечем и незачем
+    host = httpx.URL(url).host
+    local = host in ("127.0.0.1", "localhost", "::1")
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with httpx.AsyncClient(timeout=timeout, verify=not local) as client:
             r = await client.post(url, params={"wait": "true", "timeout": str(timeout - 5)}, json=params,
                                   headers={"Authorization": f"Bearer {token}"})
     except httpx.HTTPError as e:

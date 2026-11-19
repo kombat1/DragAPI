@@ -1,0 +1,24 @@
+# Служба systemd для DragAPI. Обычно её ставит deploy/install-service.sh (он подставит пути и пользователя).
+# Вручную: замените @ROOT@ и @USER@, положите в /etc/systemd/system/dragapi.service,
+#   sudo systemctl daemon-reload && sudo systemctl enable --now dragapi
+
+[Unit]
+Description=DragAPI — no-code платформа
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@USER@
+WorkingDirectory=@ROOT@/backend
+ExecStart=@ROOT@/backend/.venv/bin/python -m app @ARGS@
+Restart=on-failure
+RestartSec=3
+# на сервере обычно нет экрана: сценарии выполняют удалённые агенты
+Environment=DRAGAPI_LOCAL_AGENT=off
+Environment=PYTHONUNBUFFERED=1
+# группы пользователя (например, docker для кнопки «Деплой») systemd подставляет сам
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

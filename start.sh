@@ -7,7 +7,9 @@
 #                              → http://localhost:5173 (Ctrl+C останавливает оба)
 #   ./start.sh setup           только поставить / обновить зависимости
 #   ./start.sh [dev] ФЛАГИ     флаги передаются серверу: --no-auth, --port 9000, --host 0.0.0.0,
-#                              --no-local-agent, --config FILE
+#                              --no-local-agent, --config FILE,
+#                              HTTPS: --tls-self-signed | --tls-cert F --tls-key F | --behind-proxy
+#                              (запуск на сервере, автозапуск и прокси — deploy/README.md)
 #
 # Порт интерфейса в режиме разработки: DRAGAPI_FRONT_PORT=5174 ./start.sh dev
 set -euo pipefail
@@ -41,6 +43,20 @@ for ((i = 0; i < ${#SERVER_ARGS[@]}; i++)); do
   esac
 done
 FRONT_PORT="${DRAGAPI_FRONT_PORT:-5173}"
+
+# https, если включён встроенный HTTPS (флагом или в dragapi.toml)
+SCHEME=http
+CONF="$BACKEND/dragapi.toml"
+for ((i = 0; i < ${#SERVER_ARGS[@]}; i++)); do
+  case "${SERVER_ARGS[$i]}" in
+    --tls-self-signed | --tls-cert | --tls-cert=*) SCHEME=https ;;
+    --config) CONF="${SERVER_ARGS[$((i + 1))]:-$CONF}" ;;
+    --config=*) CONF="${SERVER_ARGS[$i]#--config=}" ;;
+  esac
+done
+if [[ $SCHEME == http && -f $CONF ]] && grep -Eq '^[[:space:]]*(tls_self_signed[[:space:]]*=[[:space:]]*true|tls_cert[[:space:]]*=)' "$CONF"; then
+  SCHEME=https
+fi
 
 # ---------- проверки ----------
 command -v python3 >/dev/null || die "нужен Python 3.10+ (python3)"
@@ -120,7 +136,7 @@ if [[ $MODE == prod ]]; then
   build_frontend
   check_port "$PORT" "сервер платформы"
   echo
-  echo "${B}DragAPI${N} → ${G}http://localhost:$PORT${N}   ${D}(Ctrl+C — остановить)${N}"
+  echo "${B}DragAPI${N} → ${G}$SCHEME://localhost:$PORT${N}   ${D}(Ctrl+C — остановить)${N}"
   cd "$BACKEND"
   exec "$PY" -m app "${SERVER_ARGS[@]}"
 fi
@@ -143,13 +159,13 @@ trap cleanup EXIT
 
 (cd "$BACKEND" && exec "$PY" -m app --reload "${SERVER_ARGS[@]}" 2>&1 | sed -u "s/^/${D}[бэкенд]${N} /") &
 PIDS+=($!)
-(cd "$FRONTEND" && DRAGAPI_BACKEND="http://127.0.0.1:$PORT" DRAGAPI_FRONT_PORT="$FRONT_PORT" exec npx vite --clearScreen false 2>&1 | sed -u "s/^/${D}[vite]${N} /") &
+(cd "$FRONTEND" && DRAGAPI_BACKEND="$SCHEME://127.0.0.1:$PORT" DRAGAPI_FRONT_PORT="$FRONT_PORT" exec npx vite --clearScreen false 2>&1 | sed -u "s/^/${D}[vite]${N} /") &
 PIDS+=($!)
 
 echo
 echo "${B}DragAPI — режим разработки${N}"
 echo "  интерфейс  → ${G}http://localhost:$FRONT_PORT${N}   ${D}(правки в frontend/src — сразу)${N}"
-echo "  бэкенд     → http://localhost:$PORT   ${D}(перезапускается при правках backend/app)${N}"
+echo "  бэкенд     → $SCHEME://localhost:$PORT   ${D}(перезапускается при правках backend/app)${N}"
 echo "  ${D}Ctrl+C — остановить оба${N}"
 echo
 

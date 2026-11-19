@@ -139,9 +139,10 @@ def _auth_error(e: auth.AuthError):
     raise HTTPException(e.status, str(e)) from None
 
 
-def _set_session(response: Response, token: str):
+def _set_session(response: Response, token: str, request: Request):
+    # по https (в т.ч. через прокси с X-Forwarded-Proto) — cookie только для https
     response.set_cookie(auth.COOKIE, token, max_age=auth.SESSION_TTL, httponly=True, samesite="lax",
-                        secure=False, path="/")
+                        secure=request.url.scheme == "https", path="/")
 
 
 @app.get("/api/auth/me")
@@ -162,7 +163,7 @@ def auth_setup(body: Credentials, response: Response, request: Request):
     except auth.AuthError as e:
         _auth_error(e)
     auth.store.claim_orphans([p["id"] for p in storage.list_projects()], user["id"])
-    _set_session(response, token)
+    _set_session(response, token, request)
     return {"user": auth.store.public(user)}
 
 
@@ -172,7 +173,7 @@ def auth_login(body: Credentials, response: Response, request: Request):
         token, user = auth.store.login(body.username, body.password, request.client.host if request.client else "")
     except auth.AuthError as e:
         _auth_error(e)
-    _set_session(response, token)
+    _set_session(response, token, request)
     return {"user": auth.store.public(user)}
 
 

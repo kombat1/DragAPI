@@ -741,12 +741,18 @@ def agent_bundle() -> bytes:
             "Агент автоматизации DragAPI\n\n"
             "1. Python 3.10+:  python -m venv .venv && .venv/bin/pip install -r requirements.txt\n"
             "   (Windows: .venv\\Scripts\\pip install -r requirements.txt)\n"
-            "2. Запуск:  DRAGAPI_AGENT_TOKEN=<токен> .venv/bin/python -m dragapi_agent --server http://<платформа>:8765\n\n"
+            "2. Запуск:  DRAGAPI_AGENT_TOKEN=<токен> .venv/bin/python -m dragapi_agent --server http://<платформа>:8765\n"
+            "   (платформа по https — --server https://…; её собственный сертификат лежит здесь же в\n"
+            "   platform-ca.pem, агент подхватывает его сам; другой файл — --ca <файл>)\n\n"
             "Linux: нужен сеанс X11 (на Wayland управление вводом ограничено).\n"
             "Распознавание текста (блок «Прочитать текст»): программа tesseract —\n"
             "   Linux: sudo apt install tesseract-ocr tesseract-ocr-rus;  Windows: установщик UB Mannheim,\n"
             "   путь к tesseract.exe — в переменной DRAGAPI_TESSERACT, если его нет в PATH.\n"
             "Аварийная остановка сценария: Ctrl+Alt+Esc или курсор в левый верхний угол экрана.\n"))
+        from .tls import active_ca
+        ca = active_ca()
+        if ca:  # платформа на своём сертификате — агент доверяет ему по этому файлу (подхватывается сам)
+            z.write(ca, "platform-ca.pem")
     return buf.getvalue()
 
 
