@@ -89,3 +89,37 @@ def test_try_back_rollback_undo(repo, capsys):
     assert run(repo, "undo") == 1                            # отменять больше нечего
     assert run(repo, "rollback", "1", "--yes") == 1          # это уже текущая версия
     assert run(repo, "show", "99abcdef") == 1                # нет такой версии
+
+
+def test_switching_versions_keeps_platform_data(tmp_path):
+    """Старая версия хранила backend/data/… в git: просмотр, откат и возврат не трогают живые данные."""
+    r = tmp_path / "repo"
+    r.mkdir()
+    git(r, "init", "-q", "-b", "develop")
+    git(r, "config", "user.email", "t@example.com")
+    git(r, "config", "user.name", "Тест")
+    data = r / "backend" / "data" / "projects"
+    data.mkdir(parents=True)
+    (data / "example.json").write_text("из первой версии")
+    (r / "app.txt").write_text("1")
+    git(r, "add", "-A")
+    git(r, "commit", "-q", "-m", "Первая версия")
+    git(r, "rm", "-q", "--cached", "-r", "backend/data")
+    (r / ".gitignore").write_text("backend/data/\n")
+    (r / "app.txt").write_text("2")
+    git(r, "add", "-A")
+    git(r, "commit", "-q", "-m", "Данные — не в git")
+    (data / "example.json").write_text("живые данные")
+    (data / "other.json").write_text("ещё проект")
+
+    def live():
+        return {p.name: p.read_text() for p in sorted(data.glob("*.json"))}
+
+    want = {"example.json": "живые данные", "other.json": "ещё проект"}
+    assert run(r, "try", "2") == 0 and live() == want
+    assert (r / "app.txt").read_text() == "1"
+    assert run(r, "back") == 0 and live() == want
+    assert git(r, "rev-parse", "--abbrev-ref", "HEAD").strip() == "develop"
+    assert run(r, "rollback", "2", "--yes") == 0 and live() == want
+    assert run(r, "undo") == 0 and live() == want
+    assert (r / "app.txt").read_text() == "2"

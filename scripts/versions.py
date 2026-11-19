@@ -24,6 +24,7 @@ import re
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 # без разделов «Добавлено/Исправлено» пункт считается исправлением, только если об этом сказано прямо
@@ -81,8 +82,10 @@ class Git:
         return self.run("rev-parse", "HEAD").strip()
 
     def dirty(self) -> list[str]:
-        """Изменённые и новые (неигнорируемые) файлы."""
-        return [line for line in self.run("status", "--porcelain").splitlines() if line.strip()]
+        """Изменённые и новые (неигнорируемые) файлы. Рабочие данные платформы (backend/data) не в счёт:
+        их бережёт keep_data, а в старых версиях они иногда числятся в git."""
+        return [line for line in self.run("status", "--porcelain").splitlines()
+                if line.strip() and not line[3:].strip('"').startswith(DATA_PREFIX)]
 
     def resolve(self, ref: str) -> str:
         out = self.run("rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}", check=False).strip()
@@ -209,6 +212,35 @@ def print_show(git: Git, it: dict):
 
 # ---------- действия ----------
 
+DATA_PREFIX = "backend/data/"
+
+
+@contextmanager
+def keep_data(git: Git, target: str):
+    """Рабочие данные платформы переживают переключение версии.
+
+    Первые версии по ошибке хранили в git backend/data/projects/example-shop.json. Переход на такую версию
+    перезаписал бы живой файл, а возврат — удалил бы его. Поэтому всё из backend/data/, что числится в git
+    в текущей или целевой версии, копируется до переключения и возвращается после.
+    """
+    tracked = set()
+    for ref in ("HEAD", target):
+        tracked |= {p for p in git.run("ls-tree", "-r", "-z", "--name-only", ref, "--", DATA_PREFIX).split("\0") if p}
+    saved = {p: (git.root / p).read_bytes() for p in sorted(tracked) if (git.root / p).is_file()}
+    if saved:  # копия на диске — на случай, если процесс оборвётся посередине
+        backup = git.state_path() / "dragapi-data-backup" / time.strftime("%Y%m%d-%H%M%S")
+        for p, data in saved.items():
+            (backup / p).parent.mkdir(parents=True, exist_ok=True)
+            (backup / p).write_bytes(data)
+    try:
+        yield
+    finally:
+        for p, data in saved.items():
+            f = git.root / p
+            if not f.is_file() or f.read_bytes() != data:
+                f.parent.mkdir(parents=True, exist_ok=True)
+                f.write_bytes(data)
+
 def ensure_clean(git: Git, stash: bool, what: str):
     changes = git.dirty()
     if not changes:
@@ -245,10 +277,11 @@ def do_try(git: Git, it: dict, stash: bool, rebuild=None):
         raise Fail("сейчас не выбрана ветка — сначала: back")
     ensure_clean(git, stash, "просмотр версии")
     name = f"version/{it['short']}-{it['date'][:10]}"
-    if git.branch() == name:
-        git.run("reset", "--hard", it["hash"])
-    else:
-        git.run("checkout", "-B", name, it["hash"])   # -B: пересоздать ветку просмотра, если осталась
+    with keep_data(git, it["hash"]):
+        if git.branch() == name:
+            git.run("reset", "--hard", it["hash"])
+        else:
+            git.run("checkout", "-B", name, it["hash"])   # -B: пересоздать ветку просмотра, если осталась
     git.save_state({**state, "viewing": {"from": origin, "branch": name, "commit": it["hash"]}})
     print(green(f"Открыта версия {it['short']} ({it['date']}) в ветке {name}."))
     print(f"Ваша ветка «{origin}» не изменилась. Вернуться: {bold('python3 scripts/versions.py back')}")
@@ -261,7 +294,8 @@ def do_back(git: Git, stash: bool, rebuild=None):
     if not viewing:
         raise Fail("вы не в режиме просмотра версии")
     ensure_clean(git, stash, "возврат")
-    git.run("checkout", viewing["from"])
+    with keep_data(git, viewing["from"]):
+        git.run("checkout", "--force", viewing["from"])   # --force: данные из backend/data вернёт keep_data
     if git.run("branch", "--list", viewing["branch"]).strip():
         git.run("branch", "-D", viewing["branch"])
     state.pop("viewing", None)
@@ -287,7 +321,8 @@ def do_rollback(git: Git, it: dict, stash: bool, rebuild=None, assume_yes=False)
     ensure_clean(git, stash, "откат")
     backup = f"backup/{branch}-{time.strftime('%Y%m%d-%H%M%S')}"
     git.run("branch", backup, "HEAD")
-    git.run("reset", "--hard", it["hash"])
+    with keep_data(git, it["hash"]):
+        git.run("reset", "--hard", it["hash"])
     state = git.state()
     state.setdefault("backups", []).append({"branch": branch, "backup": backup, "from": git.run("rev-parse", backup).strip(),
                                            "to": it["hash"], "t": time.time()})
@@ -307,7 +342,8 @@ def do_undo(git: Git, stash: bool, rebuild=None):
     if not git.run("branch", "--list", last["backup"]).strip():
         raise Fail(f"резервной ветки {last['backup']} больше нет")
     ensure_clean(git, stash, "отмена отката")
-    git.run("reset", "--hard", last["backup"])
+    with keep_data(git, last["backup"]):
+        git.run("reset", "--hard", last["backup"])
     state["backups"].remove(last)
     git.save_state(state)
     print(green(f"Откат отменён: ветка «{branch}» снова на {git.head()[:7]}."))
